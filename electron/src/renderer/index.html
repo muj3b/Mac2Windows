@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mac ↔ Windows Universal Converter</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div>
+          <h1>Mac ↔ Windows Universal Converter</h1>
+          <p class="subtitle">Automated cross-platform app conversion with AI orchestration</p>
+        </div>
+        <div class="status-indicators">
+          <span id="backend-status" class="status-pill status-pill--unknown">Backend: …</span>
+          <span id="resource-status" class="status-pill">Resources: n/a</span>
+        </div>
+      </header>
+
+      <main class="main-grid">
+        <section class="panel direction-panel">
+          <h2>Conversion Direction</h2>
+          <div class="direction-buttons">
+            <button id="btn-mac-to-win" class="direction-button" data-direction="mac-to-win">
+              Mac → Windows
+            </button>
+            <button id="btn-win-to-mac" class="direction-button" data-direction="win-to-mac">
+              Windows → Mac
+            </button>
+          </div>
+          <p class="hint-text">
+            Choose the direction before scanning your project to tailor detection and target frameworks.
+          </p>
+        </section>
+
+        <section class="panel drop-panel">
+          <h2>Project Source</h2>
+          <div id="dropzone" class="dropzone">
+            <p>Drag & drop your project folder<br /><span class="muted">(or click to browse)</span></p>
+            <input type="file" id="folder-input" webkitdirectory directory multiple hidden />
+          </div>
+          <p id="selected-path" class="selected-path">No project selected</p>
+          <button id="btn-rescan" class="secondary-button" disabled>Rescan Project</button>
+        </section>
+
+        <section class="panel detection-panel">
+          <div class="panel-header">
+            <h2>Auto-Detection</h2>
+            <span id="detection-summary" class="summary-pill">Idle</span>
+          </div>
+          <div id="detection-results" class="detection-results">
+            <div class="placeholder">Project analysis will appear here after scanning.</div>
+          </div>
+        </section>
+
+        <section class="panel ai-config-panel">
+          <h2>AI Orchestration</h2>
+          <div class="form-group">
+            <label for="model-provider">Model Provider</label>
+            <select id="model-provider"></select>
+          </div>
+          <div class="form-group">
+            <label for="model-identifier">Model / Path / Endpoint</label>
+            <input
+              id="model-identifier"
+              type="text"
+              placeholder="e.g. ollama::llama3, https://api.openai.com/v1, /Users/me/models/ggml.bin"
+            />
+          </div>
+          <div class="form-group">
+            <label for="api-key">API Key (if required)</label>
+            <input id="api-key" type="password" placeholder="Enter API key" />
+          </div>
+        </section>
+
+        <section class="panel target-config-panel">
+          <h2>Target Framework</h2>
+          <div class="form-group">
+            <label for="target-framework">Recommended Targets</label>
+            <select id="target-framework"></select>
+          </div>
+          <div class="form-group">
+            <label for="language-output">Language Output</label>
+            <select id="language-output">
+              <option value="auto">Auto (recommended)</option>
+              <option value="swift">Swift</option>
+              <option value="csharp">C#</option>
+              <option value="cpp">C++ (preserve)</option>
+            </select>
+          </div>
+          <button id="btn-start" class="primary-button" disabled>Start Conversion</button>
+          <div class="progress-controls">
+            <button id="btn-pause" class="secondary-button" disabled>Pause</button>
+            <button id="btn-resume" class="secondary-button" disabled>Resume</button>
+          </div>
+        </section>
+
+        <section class="panel conversion-settings-panel">
+          <h2>Conversion Settings</h2>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="code-style">Code Style</label>
+              <select id="code-style">
+                <option value="native">Native</option>
+                <option value="microsoft">Microsoft</option>
+                <option value="google">Google</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="comment-style">Comments</label>
+              <select id="comment-style">
+                <option value="keep">Keep</option>
+                <option value="summarize">Summarize</option>
+                <option value="minimal">Minimal</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="naming-style">Naming</label>
+              <select id="naming-style">
+                <option value="preserve">Preserve</option>
+                <option value="adapt">Adapt</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="error-style">Error Handling</label>
+              <select id="error-style">
+                <option value="adapt">Adapt</option>
+                <option value="throw">Throw</option>
+                <option value="result">Result Types</option>
+              </select>
+            </div>
+          </div>
+          <div class="template-row">
+            <input id="template-name" type="text" placeholder="Template name" />
+            <button id="btn-save-template" class="secondary-button">Save Template</button>
+            <button id="btn-load-template" class="secondary-button">Load</button>
+          </div>
+        </section>
+
+        <section class="panel performance-panel">
+          <h2>Performance & AI Strategy</h2>
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="max-cpu">Max CPU (%)</label>
+              <input id="max-cpu" type="number" min="40" max="100" value="80" />
+            </div>
+            <div class="form-group">
+              <label for="max-ram">Max RAM (GB)</label>
+              <input id="max-ram" type="number" min="2" max="64" value="16" />
+            </div>
+            <div class="form-group">
+              <label for="threads">Threads</label>
+              <input id="threads" type="number" min="1" max="16" value="4" />
+            </div>
+            <div class="form-group">
+              <label for="api-rate">API Rate Limit</label>
+              <input id="api-rate" type="number" min="5" max="120" value="30" />
+            </div>
+            <div class="form-group">
+              <label for="ai-temp">AI Temperature</label>
+              <input id="ai-temp" type="number" step="0.1" min="0" max="1" value="0.2" />
+            </div>
+            <div class="form-group">
+              <label for="ai-strategy">Model Strategy</label>
+              <select id="ai-strategy">
+                <option value="balanced">Balanced</option>
+                <option value="cost">Cost</option>
+                <option value="speed">Speed</option>
+                <option value="quality">Quality</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="ai-retries">Retries</label>
+              <input id="ai-retries" type="number" min="1" max="5" value="3" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="webhooks">Webhooks (comma separated)</label>
+            <input id="webhooks" type="text" placeholder="https://example.com/hook" />
+          </div>
+          <div class="toggle-row">
+            <label>
+              <input type="checkbox" id="debug-toggle" /> Enable Debug Mode
+            </label>
+            <button id="btn-view-logs" class="secondary-button">View Logs</button>
+          </div>
+        </section>
+
+        <section class="panel progress-panel">
+          <div class="panel-header">
+            <h2>Progress Monitor</h2>
+            <div class="progress-meta">
+              <span id="progress-summary">Idle</span>
+              <span id="progress-time">–</span>
+            </div>
+          </div>
+          <div id="progress-log" class="progress-log">
+            <div class="placeholder">
+              Conversion progress will stream here with per-file status updates.
+            </div>
+          </div>
+          <div id="progress-stats" class="progress-stats"></div>
+          <div id="logs-panel" class="logs-panel"></div>
+          <div id="diff-links" class="report-links"></div>
+        </section>
+
+        <section class="panel pre-analysis-panel">
+          <h2>Pre-Conversion Analysis</h2>
+          <div id="analysis-report" class="analysis-report">
+            <div class="placeholder">Run project scan to estimate coverage, cost, and risks.</div>
+          </div>
+          <div id="report-links" class="report-links"></div>
+        </section>
+      </main>
+    </div>
+    <script src="renderer.js" type="module"></script>
+  </body>
+</html>
