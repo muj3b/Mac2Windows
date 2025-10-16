@@ -17,7 +17,10 @@ from backend.conversion.models import (
   ConversionReport,
   ConversionSettings,
   PerformanceSettings,
-  AISettings
+  AISettings,
+  GitSettings,
+  BackupSettings,
+  ManualFixEntry
 )
 
 
@@ -51,8 +54,14 @@ class ConversionSessionStore:
           conversion_settings_json TEXT,
           performance_settings_json TEXT,
           ai_settings_json TEXT,
+          backup_settings_json TEXT,
           webhooks_json TEXT,
           conversion_report_json TEXT,
+          git_settings_json TEXT,
+          incremental INTEGER DEFAULT 0,
+          manual_queue_json TEXT,
+          test_results_json TEXT,
+          benchmarks_json TEXT,
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL
         );
@@ -63,8 +72,14 @@ class ConversionSessionStore:
         ('conversion_settings_json', 'TEXT'),
         ('performance_settings_json', 'TEXT'),
         ('ai_settings_json', 'TEXT'),
+        ('backup_settings_json', 'TEXT'),
         ('webhooks_json', 'TEXT'),
-        ('conversion_report_json', 'TEXT')
+        ('conversion_report_json', 'TEXT'),
+        ('git_settings_json', 'TEXT'),
+        ('incremental', 'INTEGER'),
+        ('manual_queue_json', 'TEXT'),
+        ('test_results_json', 'TEXT'),
+        ('benchmarks_json', 'TEXT')
       ):
         self._ensure_column(conn, column, definition)
       conn.commit()
@@ -126,8 +141,14 @@ class ConversionSessionStore:
       'conversion_settings_json': json.dumps(state.conversion_settings.__dict__),
       'performance_settings_json': json.dumps(state.performance_settings.__dict__),
       'ai_settings_json': json.dumps(state.ai_settings.__dict__),
+      'backup_settings_json': json.dumps(state.backup_settings.__dict__),
       'webhooks_json': json.dumps(state.webhooks),
       'conversion_report_json': json.dumps(state.conversion_report.metadata) if state.conversion_report else None,
+      'git_settings_json': json.dumps(state.git_settings.__dict__),
+      'incremental': 1 if state.incremental else 0,
+      'manual_queue_json': json.dumps({key: entry.to_dict() for key, entry in state.manual_queue.items()}),
+      'test_results_json': json.dumps(state.test_results) if state.test_results else None,
+      'benchmarks_json': json.dumps(state.benchmarks) if state.benchmarks else None,
       'created_at': state.created_at,
       'updated_at': state.updated_at
     }
@@ -138,14 +159,14 @@ class ConversionSessionStore:
           id, project_path, target_path, direction, stage_progress_json, chunks_json,
           paused, summary_notes_json, symbol_table_json,
           quality_report_json, conversion_settings_json, performance_settings_json,
-          ai_settings_json, webhooks_json, conversion_report_json,
+          ai_settings_json, backup_settings_json, webhooks_json, conversion_report_json, git_settings_json, incremental, manual_queue_json, test_results_json, benchmarks_json,
           created_at, updated_at
         )
         VALUES (
           :id, :project_path, :target_path, :direction, :stage_progress_json, :chunks_json,
           :paused, :summary_notes_json, :symbol_table_json,
           :quality_report_json, :conversion_settings_json, :performance_settings_json,
-          :ai_settings_json, :webhooks_json, :conversion_report_json,
+          :ai_settings_json, :backup_settings_json, :webhooks_json, :conversion_report_json, :git_settings_json, :incremental, :manual_queue_json, :test_results_json, :benchmarks_json,
           :created_at, :updated_at
         )
         ON CONFLICT(id) DO UPDATE SET
@@ -161,8 +182,14 @@ class ConversionSessionStore:
           conversion_settings_json=excluded.conversion_settings_json,
           performance_settings_json=excluded.performance_settings_json,
           ai_settings_json=excluded.ai_settings_json,
+          backup_settings_json=excluded.backup_settings_json,
           webhooks_json=excluded.webhooks_json,
           conversion_report_json=excluded.conversion_report_json,
+          git_settings_json=excluded.git_settings_json,
+          incremental=excluded.incremental,
+          manual_queue_json=excluded.manual_queue_json,
+          test_results_json=excluded.test_results_json,
+          benchmarks_json=excluded.benchmarks_json,
           created_at=excluded.created_at,
           updated_at=excluded.updated_at;
         """,
@@ -235,6 +262,26 @@ class ConversionSessionStore:
           metadata=json.loads(row['conversion_report_json'])
         )
 
+      git_settings = GitSettings(**json.loads(row['git_settings_json'])) if row['git_settings_json'] else GitSettings()
+      incremental = bool(row['incremental']) if 'incremental' in row.keys() else False
+      backup_settings = BackupSettings(**json.loads(row['backup_settings_json'])) if row['backup_settings_json'] else BackupSettings()
+      manual_queue_payload = json.loads(row['manual_queue_json']) if row['manual_queue_json'] else {}
+      manual_queue = {
+        key: ManualFixEntry(
+          chunk_id=value.get('chunk_id', key),
+          file_path=value.get('file_path', ''),
+          reason=value.get('reason', ''),
+          notes=value.get('notes', []),
+          status=value.get('status', 'pending'),
+          override_path=value.get('override_path'),
+          submitted_by=value.get('submitted_by'),
+          timestamp=value.get('timestamp')
+        )
+        for key, value in manual_queue_payload.items()
+      }
+      test_results = json.loads(row['test_results_json']) if row['test_results_json'] else None
+      benchmarks = json.loads(row['benchmarks_json']) if row['benchmarks_json'] else {}
+
       return SessionState(
         session_id=row['id'],
         project_path=Path(row['project_path']),
@@ -251,8 +298,14 @@ class ConversionSessionStore:
         conversion_settings=_reconstruct_settings(json.loads(row['conversion_settings_json'])) if row['conversion_settings_json'] else ConversionSettings(),
         performance_settings=_reconstruct_performance(json.loads(row['performance_settings_json'])) if row['performance_settings_json'] else PerformanceSettings(),
         ai_settings=_reconstruct_ai(json.loads(row['ai_settings_json'])) if row['ai_settings_json'] else AISettings(),
+        backup_settings=backup_settings,
         webhooks=json.loads(row['webhooks_json']) if row['webhooks_json'] else [],
-        conversion_report=conversion_report
+        conversion_report=conversion_report,
+        incremental=incremental,
+        git_settings=git_settings,
+        manual_queue=manual_queue,
+        test_results=test_results,
+        benchmarks=benchmarks
       )
 
 

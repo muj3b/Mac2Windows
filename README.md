@@ -62,6 +62,8 @@ The backend automatically detects configured providers and routes calls to Claud
 - Dependency stage maps CocoaPods/SwiftPM ↔ NuGet, emitting `packages.config` or `Package.swift` as appropriate.
 - Validation stage runs `dotnet build` or `swiftc -typecheck` when toolchains are available; issues surface in the progress log and summary notes.
 - Advanced tooling (Phase 3): git pre/post snapshots, incremental conversion, diff viewer exports, AI self-review, vulnerability/license checks, cloud backups, benchmark summaries, webhook notifications, and manual fallback queues.
+- Asset optimisation (Phase 3 step 4): PNG/JPEG resources are compressed automatically (configurable quality and megapixel caps via conversion settings). Savings are logged in the session notes and included in reports.
+- Vulnerability & license reporting: dependencies are checked against OSV during conversion; SPDX-based license scanning flags high-risk combinations. Issues surface in quality reports and can trigger manual fix workflows.
 
 ## Current Capabilities
 
@@ -74,6 +76,10 @@ The backend automatically detects configured providers and routes calls to Claud
   - Learning memory applies user corrections to future conversions.
 - **Conversion engine** – resources, dependencies, setup, code, tests, and quality stages with pause/resume, auto-save, and batch scheduling.
 - **Quality assurance & reporting** – syntax + build heuristics, dependency/API/resource/security checks, AI self-review, vulnerability/license alerts, performance benchmarks, backup/rollback, and searchable HTML reports with per-file diffs.
+- **Cloud backups & retention** – encrypted credential store with local/GDrive/Dropbox/OneDrive uploads, per-session metadata, and retention limits driven from the UI.
+- **Interactive reports** – consolidated HTML report with summary metrics, searchable diff viewer, severity filters, and one-click AI explanations for any changed line.
+- **Automated test scaffolding** – XCTest ↔ NUnit conversions with post-conversion execution, failure surfacing, and TODOs for complex cases.
+- **Performance benchmarking** – cross-project UI/data parsing benchmarks with regression detection and reporting.
 - **Collaboration tooling** – shared templates, detailed logs, debug prompt capture, webhook notifications, and conversion memory for organization-wide reuse.
 
 To confirm AI connectivity, start the app with valid API keys and use the UI's model selector to run a quick request (e.g. prompt “Convert this Swift code to C#: `let x = 5`”). Streaming responses, token/cost tracking, and error handling are visible in the progress panel and logs.
@@ -85,6 +91,35 @@ To confirm AI connectivity, start the app with valid API keys and use the UI's m
 3. Hit **Start Conversion**. Progress updates show per-stage completion, current file, ETA, token usage, and cost. Pause/resume anytime.
 4. Review the generated assets: converted project under `<ProjectName>.<direction>.converted`, HTML report + diffs in `/reports`, backups in `/backups`, and logs via the UI.
 5. Trigger rollbacks, share templates, or schedule batch conversions as needed.
+
+## Cloud Backups
+
+- Enable the **Cloud Backup** toggle in the settings panel to mirror the converted target after each run.
+- Supported providers: local filesystem, Google Drive, Dropbox, and OneDrive. OAuth flows launch in your default browser and tokens are encrypted via `data/credentials.db`.
+- Configure retention (number of archives to keep), remote path template (supports `{project}`, `{direction}`, `{session}`, `{timestamp}`), and credential selection directly from the UI. Local backups can target any writable directory.
+- Each backup embeds `conversion_metadata.json` (tokens, cost, quality summary, notes) inside the archive. The consolidated HTML report lists recent backups and links to cloud copies when available.
+- Rollbacks continue to reference the `backups/` folder under each converted project; cloud copies are treated as off-site mirrors.
+
+## Automated Test Generation
+
+- Test files detected during planning are fed through a specialised prompt to translate XCTest ↔ NUnit (or vice versa) while preserving assertions, fixtures, and naming conventions.
+- Converted tests are written directly to the target project tree. Failures or provider issues automatically enqueue manual-fix tasks with contextual notes.
+- After conversion the harness executes `dotnet test` or `swift test` (tooling permitting). Results flow into the quality report, progress dashboard, and summary notes.
+- Any failing suites generate actionable TODO entries and appear in the HTML report’s summary + quality tabs.
+
+## Performance Benchmarks
+
+- A lightweight benchmark harness parses representative UI and data assets in both the original and converted projects.
+- Metrics capture wall-clock duration, CPU time, and memory deltas for operations such as XML layout parsing and resource loading.
+- Regression thresholds (20% by default) automatically flag slowdowns in the quality report and conversion summary.
+- Benchmark results appear in the interactive report (summary tab) with side-by-side comparisons and regression highlighting.
+
+## Interactive Reports & Diff Viewer
+
+- The **Open Conversion Report** button launches a self-contained HTML dashboard with summary metrics, quality outcomes, and a searchable diff explorer.
+- Filter files by severity, search by name, or drill into any change. Selecting a line requests an on-demand explanation from the same model/provider used for the conversion.
+- Reports render locally (no network dependency) and can be exported to PDF via the built-in **Export PDF** button or the browser’s print dialogue.
+- Quality issues surface in a dedicated tab with categorised severity. AI explanations require the session to remain active so the backend can reuse the cached provider credentials.
 
 ## Key APIs & Integrations
 

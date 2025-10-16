@@ -8,7 +8,8 @@ const state = {
   sessionId: null,
   progressTimer: null,
   targetPath: null,
-  templates: []
+  templates: [],
+  backupProviders: []
 };
 
 const STAGE_DISPLAY_ORDER = [
@@ -61,7 +62,23 @@ const elements = {
   debugToggle: document.getElementById('debug-toggle'),
   viewLogsButton: document.getElementById('btn-view-logs'),
   logsPanel: document.getElementById('logs-panel'),
-  reportLinks: document.getElementById('report-links')
+  reportLinks: document.getElementById('report-links'),
+  backupEnabled: document.getElementById('backup-enabled'),
+  backupProvider: document.getElementById('backup-provider'),
+  backupCredential: document.getElementById('backup-credential'),
+  backupConnectButton: document.getElementById('btn-backup-connect'),
+  backupRefreshButton: document.getElementById('btn-backup-refresh'),
+  backupRemotePath: document.getElementById('backup-remote-path'),
+  backupRetention: document.getElementById('backup-retention'),
+  backupAdvanced: document.getElementById('backup-advanced-fields'),
+  backupCredentialLabel: document.getElementById('backup-credential-label'),
+  backupClientId: document.getElementById('backup-client-id'),
+  backupClientSecret: document.getElementById('backup-client-secret'),
+  backupScopes: document.getElementById('backup-scopes'),
+  backupRootFolder: document.getElementById('backup-root-folder'),
+  backupTenant: document.getElementById('backup-tenant'),
+  backupLocalPath: document.getElementById('backup-local-path'),
+  backupSaveLocalButton: document.getElementById('btn-backup-save-local')
 };
 
 const formatPercent = (value) => `${Math.round(value * 100)}%`;
@@ -418,6 +435,11 @@ const boot = async () => {
   elements.loadTemplateButton.addEventListener('click', loadTemplate);
   elements.viewLogsButton.addEventListener('click', viewLogs);
   elements.debugToggle.addEventListener('change', onToggleDebug);
+  elements.backupEnabled.addEventListener('change', onBackupToggle);
+  elements.backupProvider.addEventListener('change', onBackupProviderChange);
+  elements.backupConnectButton.addEventListener('click', onBackupConnect);
+  elements.backupRefreshButton.addEventListener('click', loadBackupProviders);
+  elements.backupSaveLocalButton.addEventListener('click', onBackupSaveLocal);
 
   await updateBackendStatus();
   await updateResourceStatus();
@@ -425,6 +447,8 @@ const boot = async () => {
   const providerResponse = await window.macWinBridge.listModels();
   populateModelProviders(providerResponse);
   await refreshTemplates();
+  await loadBackupProviders();
+  setBackupUiEnabled(elements.backupEnabled.checked);
 
   state.healthTimer = setInterval(updateBackendStatus, 15000);
   state.resourceTimer = setInterval(updateResourceStatus, 10000);
@@ -463,18 +487,202 @@ const collectAISettings = () => ({
   retries: Number.parseInt(elements.aiRetries.value, 10) || 3
 });
 
+const collectBackupSettings = () => {
+  const provider = elements.backupProvider.value || 'local';
+  const retention = Number.parseInt(elements.backupRetention.value, 10) || 10;
+  const remotePath = elements.backupRemotePath.value.trim() || '{project}/{direction}';
+  const credentialId = elements.backupCredential.value || null;
+  const enabled = elements.backupEnabled.checked;
+  return {
+    enabled,
+    provider,
+    retention_count: retention,
+    remote_path: remotePath,
+    credential_id: credentialId || null
+  };
+};
+
 const collectWebhooks = () => {
   const raw = elements.webhooksInput.value.trim();
   if (!raw) return [];
   return raw.split(',').map((item) => item.trim()).filter(Boolean);
 };
 
+const findBackupProvider = (providerId) => state.backupProviders.find((provider) => provider.id === providerId);
+
+const updateBackupCredentialOptions = () => {
+  const providerId = elements.backupProvider.value;
+  const providerInfo = findBackupProvider(providerId);
+  elements.backupCredential.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = providerInfo?.credentials?.length ? 'Select credential…' : 'No credentials connected';
+  elements.backupCredential.appendChild(placeholder);
+  (providerInfo?.credentials || []).forEach((credential) => {
+    const option = document.createElement('option');
+    option.value = credential.id;
+    const created = new Date(credential.created_at * 1000).toLocaleString();
+    option.textContent = `${credential.label} • ${created}`;
+    elements.backupCredential.appendChild(option);
+  });
+  elements.backupCredential.disabled = !elements.backupEnabled.checked || !(providerInfo?.credentials?.length);
+};
+
+const toggleBackupField = (selector, visible) => {
+  const field = elements.backupAdvanced.querySelector(selector);
+  if (field) {
+    field.classList.toggle('hidden', !visible);
+  }
+};
+
+const updateBackupAdvancedVisibility = () => {
+  const providerId = elements.backupProvider.value || 'local';
+  const providerInfo = findBackupProvider(providerId) || { requires_oauth: false };
+  const isOAuth = providerInfo.requires_oauth;
+  const isLocal = providerId === 'local';
+  toggleBackupField('.backup-label-field', true);
+  toggleBackupField('.backup-client-field', isOAuth);
+  toggleBackupField('.backup-secret-field', isOAuth);
+  toggleBackupField('.backup-scopes-field', isOAuth);
+  toggleBackupField('.backup-root-field', isOAuth || providerId === 'local' || providerId === 'dropbox' || providerId === 'google_drive' || providerId === 'one_drive');
+  toggleBackupField('.backup-tenant-field', providerId === 'one_drive');
+  toggleBackupField('.backup-local-field', isLocal);
+  elements.backupConnectButton.disabled = !elements.backupEnabled.checked || (!isOAuth && providerId !== 'local');
+  elements.backupSaveLocalButton.disabled = !(elements.backupEnabled.checked && isLocal);
+  updateBackupCredentialOptions();
+};
+
+const setBackupUiEnabled = (enabled) => {
+  elements.backupProvider.disabled = !enabled;
+  elements.backupRetention.disabled = !enabled;
+  elements.backupRemotePath.disabled = !enabled;
+  elements.backupCredential.disabled = !enabled;
+  elements.backupCredentialLabel.disabled = !enabled;
+  elements.backupClientId.disabled = !enabled;
+  elements.backupClientSecret.disabled = !enabled;
+  elements.backupScopes.disabled = !enabled;
+  elements.backupRootFolder.disabled = !enabled;
+  elements.backupTenant.disabled = !enabled;
+  elements.backupLocalPath.disabled = !enabled;
+  elements.backupConnectButton.disabled = !enabled;
+  elements.backupSaveLocalButton.disabled = !enabled;
+  if (enabled) {
+    updateBackupAdvancedVisibility();
+  }
+};
+
+const onBackupToggle = () => {
+  const enabled = elements.backupEnabled.checked;
+  setBackupUiEnabled(enabled);
+  if (!enabled) {
+    elements.backupCredential.value = '';
+  }
+};
+
+const populateBackupProviders = () => {
+  elements.backupProvider.innerHTML = '';
+  state.backupProviders.forEach((provider) => {
+    const option = document.createElement('option');
+    option.value = provider.id;
+    option.textContent = provider.name;
+    elements.backupProvider.appendChild(option);
+  });
+  if (!elements.backupProvider.value && state.backupProviders.length) {
+    const defaultProvider = state.backupProviders.find((item) => item.id === 'local') || state.backupProviders[0];
+    elements.backupProvider.value = defaultProvider.id;
+  }
+  updateBackupAdvancedVisibility();
+};
+
+const loadBackupProviders = async () => {
+  const response = await window.macWinBridge.listBackupProviders();
+  if (response?.providers) {
+    const previousProvider = elements.backupProvider.value;
+    const previousCredential = elements.backupCredential.value;
+    state.backupProviders = response.providers;
+    populateBackupProviders();
+    if (previousProvider && findBackupProvider(previousProvider)) {
+      elements.backupProvider.value = previousProvider;
+    }
+    updateBackupAdvancedVisibility();
+    if (previousCredential) {
+      elements.backupCredential.value = previousCredential;
+    }
+  }
+};
+
+const onBackupProviderChange = () => {
+  updateBackupAdvancedVisibility();
+};
+
+const onBackupConnect = async () => {
+  const providerId = elements.backupProvider.value;
+  const providerInfo = findBackupProvider(providerId);
+  if (!providerInfo) {
+    alert('Select a backup provider first.');
+    return;
+  }
+  if (!providerInfo.requires_oauth) {
+    alert('Selected provider does not require OAuth connection.');
+    return;
+  }
+  const clientId = elements.backupClientId.value.trim();
+  const clientSecret = elements.backupClientSecret.value.trim();
+  const label = elements.backupCredentialLabel.value.trim() || `${providerInfo.name} Credential`;
+  if (!clientId || !clientSecret) {
+    alert('Enter both client ID and client secret.');
+    return;
+  }
+  const scopesRaw = elements.backupScopes.value.trim();
+  const config = {
+    client_id: clientId,
+    client_secret: clientSecret,
+    label,
+    root_folder: elements.backupRootFolder.value.trim() || undefined,
+    tenant: providerId === 'one_drive' ? elements.backupTenant.value.trim() || 'common' : undefined,
+    scopes: scopesRaw ? scopesRaw.split(',').map((scope) => scope.trim()).filter(Boolean) : undefined
+  };
+  const result = await window.macWinBridge.startBackupOAuth(providerId, config);
+  if (result?.error) {
+    alert(result.message || 'Unable to start authorization.');
+    return;
+  }
+  if (result?.auth_url) {
+    await window.macWinBridge.openExternal(result.auth_url);
+    alert('Authorization opened in your browser. Complete the flow and click Refresh once finished.');
+  }
+};
+
+const onBackupSaveLocal = async () => {
+  const path = elements.backupLocalPath.value.trim();
+  if (!path) {
+    alert('Provide a local backup directory path.');
+    return;
+  }
+  const label = elements.backupCredentialLabel.value.trim() || 'Local Backup';
+  const response = await window.macWinBridge.createBackupCredential('local', {
+    label,
+    data: { base_path: path }
+  });
+  if (response?.error) {
+    alert(response.message || 'Failed to save local backup path.');
+    return;
+  }
+  await loadBackupProviders();
+};
+
 const updateReportLinks = (summary) => {
   elements.reportLinks.innerHTML = '';
   if (summary.conversion_report) {
-    const link = document.createElement('div');
-    link.textContent = `Conversion report: ${summary.conversion_report}`;
-    elements.reportLinks.appendChild(link);
+    const wrapper = document.createElement('div');
+    const button = document.createElement('button');
+    button.textContent = 'Open Conversion Report';
+    button.className = 'secondary-button link-button';
+    button.addEventListener('click', () => {
+      window.macWinBridge.openPath(summary.conversion_report);
+    });
+    wrapper.appendChild(button);
+    elements.reportLinks.appendChild(wrapper);
   }
   if (summary.quality_report?.ai_review_notes?.length) {
     summary.quality_report.ai_review_notes.forEach((note) => {
@@ -487,6 +695,20 @@ const updateReportLinks = (summary) => {
     summary.diff_links.forEach((href) => {
       const item = document.createElement('div');
       item.innerHTML = `<a href="${href}" target="_blank">Diff: ${href.split('/').pop()}</a>`;
+      elements.reportLinks.appendChild(item);
+    });
+  }
+  if (summary.backups?.length) {
+    summary.backups.slice(0, 3).forEach((backup) => {
+      const item = document.createElement('div');
+      const timestamp = new Date((backup.created_at || 0) * 1000).toLocaleString();
+      const provider = backup.provider || 'backup';
+      const link = backup.metadata?.remote?.remote_url || backup.remote_url;
+      if (link) {
+        item.innerHTML = `<a href="${link}" target="_blank">Backup (${provider}) • ${timestamp}</a>`;
+      } else {
+        item.textContent = `Backup (${provider}) • ${timestamp}`;
+      }
       elements.reportLinks.appendChild(item);
     });
   }
@@ -524,6 +746,14 @@ const onStartConversion = async () => {
   const performanceSettings = collectPerformanceSettings();
   const aiSettings = collectAISettings();
   const webhooks = collectWebhooks();
+  const backupSettings = collectBackupSettings();
+  if (backupSettings.enabled) {
+    const providerInfo = findBackupProvider(backupSettings.provider);
+    if (providerInfo?.requires_oauth && !backupSettings.credential_id) {
+      alert('Select a credential for the chosen backup provider.');
+      return;
+    }
+  }
   const payload = {
     project_path: state.projectPath,
     target_path: targetPath,
@@ -534,7 +764,8 @@ const onStartConversion = async () => {
     conversion: conversionSettings,
     performance: performanceSettings,
     ai: aiSettings,
-    webhooks
+    webhooks,
+    backup: backupSettings
   };
 
   elements.startButton.disabled = true;
@@ -656,8 +887,17 @@ const renderProgress = (summary) => {
     `Cost: $${(summary.cost_usd || 0).toFixed(4)}`,
     `Session: ${state.sessionId || 'n/a'}`,
     state.targetPath ? `Target: ${state.targetPath}` : null,
-    summary.conversion_report ? `Report: ${summary.conversion_report}` : null
+    summary.conversion_report ? `Report: ${summary.conversion_report}` : null,
+    summary.manual_fixes_pending ? `Manual Fixes Pending: ${summary.manual_fixes_pending}` : null
   ].filter(Boolean);
+  if (summary.test_results?.status) {
+    const failures = summary.test_results.failures ? summary.test_results.failures.length : 0;
+    stats.push(`Tests: ${summary.test_results.status.toUpperCase()} (${failures} failures)`);
+  }
+  if (summary.benchmarks?.comparisons?.length) {
+    const regressions = summary.benchmarks.regressions ? summary.benchmarks.regressions.length : 0;
+    stats.push(`Benchmarks: ${summary.benchmarks.comparisons.length} checks • ${regressions} regressions`);
+  }
   elements.progressStats.innerHTML = stats
     .map((item) => `<span class="stat-item">${item}</span>`)
     .join('');

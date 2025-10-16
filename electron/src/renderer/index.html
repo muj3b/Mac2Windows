@@ -190,6 +190,68 @@
           </div>
         </section>
 
+        <section class="panel backup-panel">
+          <h2>Backup Settings</h2>
+          <div class="form-group">
+            <label>
+              <input type="checkbox" id="backup-enabled" /> Enable Cloud Backup
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="backup-provider">Provider</label>
+            <select id="backup-provider"></select>
+          </div>
+          <div class="form-group">
+            <label for="backup-credential">Credential</label>
+            <div class="input-with-actions">
+              <select id="backup-credential"></select>
+              <button id="btn-backup-connect" class="secondary-button">Connect</button>
+              <button id="btn-backup-refresh" class="secondary-button">Refresh</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="backup-remote-path">Remote Path Template</label>
+            <input id="backup-remote-path" type="text" placeholder="{project}/{direction}" />
+          </div>
+          <div class="form-group">
+            <label for="backup-retention">Retention (copies)</label>
+            <input id="backup-retention" type="number" min="1" max="50" value="10" />
+          </div>
+          <div id="backup-advanced-fields">
+            <div class="form-group backup-label-field">
+              <label for="backup-credential-label">Credential Label</label>
+              <input id="backup-credential-label" type="text" placeholder="Workspace name" />
+            </div>
+            <div class="form-group backup-client-field">
+              <label for="backup-client-id">Client ID</label>
+              <input id="backup-client-id" type="text" placeholder="OAuth client id" />
+            </div>
+            <div class="form-group backup-secret-field">
+              <label for="backup-client-secret">Client Secret</label>
+              <input id="backup-client-secret" type="password" placeholder="OAuth client secret" />
+            </div>
+            <div class="form-group backup-scopes-field">
+              <label for="backup-scopes">Scopes (comma separated)</label>
+              <input id="backup-scopes" type="text" placeholder="Leave blank for defaults" />
+            </div>
+            <div class="form-group backup-root-field">
+              <label for="backup-root-folder">Root Folder</label>
+              <input id="backup-root-folder" type="text" placeholder="MacWinConverter Backups" />
+            </div>
+            <div class="form-group backup-tenant-field">
+              <label for="backup-tenant">Tenant (OneDrive)</label>
+              <input id="backup-tenant" type="text" placeholder="common" />
+            </div>
+            <div class="form-group backup-local-field">
+              <label for="backup-local-path">Local Backup Directory</label>
+              <div class="input-with-actions">
+                <input id="backup-local-path" type="text" placeholder="/path/to/backups" />
+                <button id="btn-backup-save-local" class="secondary-button">Save Path</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section class="panel progress-panel">
           <div class="panel-header">
             <h2>Progress Monitor</h2>

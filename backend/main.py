@@ -8,9 +8,11 @@ from typing import Any, Dict, Optional, List
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.ai.clients import ProviderError
 from backend.ai.provider_registry import ProviderRegistry
 from backend.conversion.manager import ConversionManager
 from backend.conversion.mappings import (
@@ -19,7 +21,7 @@ from backend.conversion.mappings import (
   DependencyMapping,
   ApiMappingCatalog
 )
-from backend.conversion.models import ConversionSettings, PerformanceSettings, AISettings
+from backend.conversion.models import ConversionSettings, PerformanceSettings, AISettings, GitSettings, BackupSettings
 from backend.config import settings
 from backend.detection.scanner import ProjectScanner, ScannerError
 from backend.resources.monitor import ResourceMonitor
@@ -30,6 +32,9 @@ from backend.logging.event_logger import EventLogger
 from backend.learning.memory import LearningMemory
 from backend.templates.manager import TemplateManager
 from backend.batch.manager import BatchManager, BatchItem
+from backend.security.secret_manager import SecretManager
+from backend.storage.credentials import CredentialStore
+from backend.storage.backup import BackupManager
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
@@ -58,6 +63,9 @@ event_logger = EventLogger(settings.data_dir / 'logs')
 learning_memory = LearningMemory(settings.data_dir / 'learning_memory.json')
 template_manager = TemplateManager(settings.data_dir / 'templates')
 batch_manager = BatchManager()
+secret_manager = SecretManager(settings.secret_key_path)
+credential_store = CredentialStore(settings.credentials_db_path, secret_manager)
+backup_manager = BackupManager(credential_store, settings.backup_root)
 conversion_manager = ConversionManager(
   provider_registry=providers,
   dependency_mapping=DependencyMapping(DEPENDENCY_MAP),
@@ -65,6 +73,7 @@ conversion_manager = ConversionManager(
   embedding_store=embedding_store,
   session_store=session_store,
   resource_monitor=resources,
+  backup_manager=backup_manager,
   event_logger=event_logger,
   learning_memory=learning_memory
 )
@@ -98,6 +107,35 @@ class AISettingsPayload(BaseModel):
   retries: int = Field(default=3, ge=1, le=5)
 
 
+class GitSettingsPayload(BaseModel):
+  enabled: Optional[bool] = Field(default=None)
+  tag_after_completion: Optional[bool] = Field(default=None)
+  tag_prefix: Optional[str] = Field(default=None)
+  branch: Optional[str] = Field(default=None)
+
+
+class BackupSettingsPayload(BaseModel):
+  enabled: bool = Field(default=False)
+  provider: str = Field(default='local')
+  retention_count: int = Field(default=10, ge=1, le=50)
+  remote_path: str = Field(default='{project}/{direction}')
+  credential_id: Optional[str] = Field(default=None)
+
+
+class BackupOAuthStartPayload(BaseModel):
+  client_id: str
+  client_secret: str
+  label: str
+  scopes: Optional[List[str]] = None
+  root_folder: Optional[str] = None
+  tenant: Optional[str] = None
+
+
+class BackupCredentialPayload(BaseModel):
+  label: str
+  data: Dict[str, Any]
+
+
 class TemplatePayload(BaseModel):
   name: str
   conversion: ConversionSettingsPayload
@@ -119,6 +157,9 @@ class BatchConversionPayload(BaseModel):
   conversion: Optional[ConversionSettingsPayload] = None
   performance: Optional[PerformanceSettingsPayload] = None
   ai: Optional[AISettingsPayload] = None
+  git: Optional[GitSettingsPayload] = None
+  incremental: Optional[bool] = None
+  backup: Optional[BackupSettingsPayload] = None
 
 
 class DebugTogglePayload(BaseModel):
@@ -128,6 +169,12 @@ class DebugTogglePayload(BaseModel):
 class RollbackPayload(BaseModel):
   session_id: str
   backup_path: Optional[str] = None
+
+
+class ManualFixSubmissionPayload(BaseModel):
+  code: str
+  note: Optional[str] = None
+  submitted_by: Optional[str] = None
 
 
 class ConversionStartPayload(BaseModel):
@@ -142,6 +189,16 @@ class ConversionStartPayload(BaseModel):
   ai: Optional[AISettingsPayload] = Field(default=None)
   webhooks: Optional[List[str]] = Field(default=None)
   incremental: Optional[bool] = Field(default=False)
+  git: Optional[GitSettingsPayload] = Field(default=None)
+  backup: Optional[BackupSettingsPayload] = Field(default=None)
+
+
+class DiffExplanationPayload(BaseModel):
+  session_id: str
+  file_path: str
+  line_number: int = Field(default=0, ge=0)
+  before_snippet: str = Field(default='')
+  after_snippet: str = Field(default='')
 
 
 class ConversionControlPayload(BaseModel):
@@ -202,6 +259,20 @@ async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
   performance_settings = PerformanceSettings(**payload.performance.dict()) if payload.performance else PerformanceSettings()
   ai_settings = AISettings(**payload.ai.dict()) if payload.ai else AISettings()
   webhooks = payload.webhooks or []
+  git_settings = GitSettings(
+    enabled=payload.git.enabled if payload.git and payload.git.enabled is not None else settings.git_enabled,
+    tag_after_completion=payload.git.tag_after_completion if payload.git and payload.git.tag_after_completion is not None else False,
+    tag_prefix=payload.git.tag_prefix if payload.git and payload.git.tag_prefix else settings.git_tag_prefix,
+    branch=payload.git.branch if payload.git and payload.git.branch else settings.git_branch
+  )
+  backup_payload = payload.backup
+  backup_settings = BackupSettings(
+    enabled=backup_payload.enabled if backup_payload else False,
+    provider=backup_payload.provider if backup_payload else settings.default_backup_provider,
+    retention_count=backup_payload.retention_count if backup_payload else settings.backup_retention_count,
+    remote_path=backup_payload.remote_path if backup_payload else settings.backup_remote_template,
+    credential_id=backup_payload.credential_id if backup_payload else None
+  )
 
   session = conversion_manager.start_session(
     project_path=project_path,
@@ -214,7 +285,9 @@ async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
     performance_settings=performance_settings,
     ai_settings=ai_settings,
     webhooks=webhooks,
-    incremental=payload.incremental or False
+    incremental=payload.incremental or False,
+    git_settings=git_settings,
+    backup_settings=backup_settings
   )
 
   summary = session.progress.summary()
@@ -248,6 +321,27 @@ async def conversion_status(session_id: str) -> Dict[str, Any]:
   return {'session_id': session_id, 'summary': _serialize_summary(summary)}
 
 
+@app.get('/conversion/manual/{session_id}')
+async def conversion_manual_list(session_id: str) -> Dict[str, Any]:
+  fixes = conversion_manager.list_manual_fixes(session_id)
+  return {'manual_fixes': fixes}
+
+
+@app.post('/conversion/manual/{session_id}/{chunk_id}')
+async def conversion_manual_apply(session_id: str, chunk_id: str, payload: ManualFixSubmissionPayload) -> Dict[str, Any]:
+  try:
+    conversion_manager.submit_manual_fix(session_id, chunk_id, payload.code, submitted_by=payload.submitted_by, note=payload.note)
+  except ValueError as exc:  # session not active or chunk missing
+    raise HTTPException(status_code=400, detail=str(exc))
+  summary = conversion_manager.get_summary(session_id)
+  return {
+    'session_id': session_id,
+    'chunk_id': chunk_id,
+    'status': 'applied',
+    'summary': _serialize_summary(summary)
+  }
+
+
 def _serialize_summary(summary: Optional[Any]) -> Optional[Dict[str, Any]]:
   if not summary:
     return None
@@ -272,7 +366,11 @@ def _serialize_summary(summary: Optional[Any]) -> Optional[Dict[str, Any]]:
       for stage, progress in summary.stage_progress.items()
     },
     'quality_report': summary.quality_report.summary() if summary.quality_report else None,
-    'conversion_report': str(summary.conversion_report.summary_html) if summary.conversion_report else None
+    'conversion_report': str(summary.conversion_report.summary_html) if summary.conversion_report else None,
+    'manual_fixes_pending': summary.manual_fixes_pending,
+    'backups': summary.backups,
+    'test_results': summary.test_results,
+    'benchmarks': summary.benchmarks
   }
 
 
@@ -349,6 +447,116 @@ async def set_debug(payload: DebugTogglePayload) -> Dict[str, Any]:
   return {'enabled': payload.enabled}
 
 
+@app.get('/backups/providers')
+async def list_backup_providers() -> Dict[str, Any]:
+  return {'providers': backup_manager.list_providers()}
+
+
+@app.post('/backups/providers/{provider}/oauth/start')
+async def start_backup_oauth(provider: str, payload: BackupOAuthStartPayload) -> Dict[str, Any]:
+  try:
+    redirect_uri = f'http://{settings.backend_host}:{settings.backend_port}/backups/oauth/{provider}/callback'
+    result = backup_manager.start_oauth(provider, payload.dict(exclude_none=True), redirect_uri)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  return result
+
+
+@app.get('/backups/oauth/{provider}/callback', response_class=HTMLResponse)
+async def complete_backup_oauth(
+  provider: str,
+  state: Optional[str] = None,
+  code: Optional[str] = None,
+  error: Optional[str] = None,
+  error_description: Optional[str] = None
+) -> HTMLResponse:
+  if error:
+    content = f"<html><body><h1>Authorization failed</h1><p>{error_description or error}</p></body></html>"
+    return HTMLResponse(content=content, status_code=400)
+  if not state or not code:
+    raise HTTPException(status_code=400, detail='Missing OAuth code or state parameter.')
+  try:
+    record = backup_manager.complete_oauth(provider, state, code)
+  except ValueError as exc:
+    content = f"<html><body><h1>Authorization failed</h1><p>{exc}</p></body></html>"
+    return HTMLResponse(content=content, status_code=400)
+  content = (
+    "<html><body><h1>Backup provider connected</h1>"
+    f"<p>Credential saved as: {record.label}</p>"
+    "<p>You may close this window.</p>"
+    "<script>setTimeout(() => window.close(), 1500);</script>"
+    "</body></html>"
+  )
+  return HTMLResponse(content=content)
+
+
+@app.post('/backups/providers/{provider}/credentials')
+async def create_backup_credentials(provider: str, payload: BackupCredentialPayload) -> Dict[str, Any]:
+  try:
+    record = credential_store.save_credentials(provider, payload.label, payload.data)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  return {
+    'credential': {
+      'id': record.id,
+      'provider': record.provider,
+      'label': record.label,
+      'created_at': record.created_at,
+      'updated_at': record.updated_at
+    }
+  }
+
+
+@app.delete('/backups/credentials/{credential_id}')
+async def delete_backup_credential(credential_id: str) -> Dict[str, Any]:
+  if not backup_manager.delete_credential(credential_id):
+    raise HTTPException(status_code=404, detail='Credential not found')
+  return {'status': 'deleted', 'credential_id': credential_id}
+
+
+@app.get('/backups/sessions/{session_id}')
+async def list_session_backups(session_id: str) -> Dict[str, Any]:
+  records = backup_manager.list_backups(session_id=session_id)
+  return {
+    'backups': [
+      {
+        'id': record.id,
+        'provider': record.provider,
+        'credential_id': record.credential_id,
+        'remote_id': record.remote_id,
+        'remote_url': record.remote_url,
+        'metadata': record.metadata,
+        'created_at': record.created_at
+      }
+      for record in records
+    ]
+  }
+
+
+@app.post('/diff/explain')
+async def explain_diff(payload: DiffExplanationPayload) -> Dict[str, Any]:
+  if not payload.before_snippet.strip() and not payload.after_snippet.strip():
+    raise HTTPException(status_code=400, detail='Diff snippets required for explanation.')
+  session = conversion_manager.sessions.get(payload.session_id)
+  if not session:
+    raise HTTPException(status_code=404, detail='Session must be active to request diff explanations.')
+  metadata = {
+    'file_path': payload.file_path,
+    'line_number': payload.line_number,
+    'direction': session.direction
+  }
+  try:
+    result = await conversion_manager.orchestrator.explain_diff(
+      session.orchestrator_config,
+      payload.before_snippet,
+      payload.after_snippet,
+      metadata
+    )
+  except ProviderError as exc:
+    raise HTTPException(status_code=502, detail=str(exc)) from exc
+  return result
+
+
 @app.post('/conversion/rollback')
 async def prepare_rollback(payload: RollbackPayload) -> Dict[str, Any]:
   backup_path = Path(payload.backup_path) if payload.backup_path else None
@@ -361,6 +569,20 @@ async def start_batch(payload: BatchConversionPayload) -> Dict[str, Any]:
   conversion_settings = ConversionSettings(**payload.conversion.dict()) if payload.conversion else ConversionSettings()
   performance_settings = PerformanceSettings(**payload.performance.dict()) if payload.performance else PerformanceSettings()
   ai_settings = AISettings(**payload.ai.dict()) if payload.ai else AISettings()
+  git_settings = GitSettings(
+    enabled=payload.git.enabled if payload.git and payload.git.enabled is not None else settings.git_enabled,
+    tag_after_completion=payload.git.tag_after_completion if payload.git and payload.git.tag_after_completion is not None else False,
+    tag_prefix=payload.git.tag_prefix if payload.git and payload.git.tag_prefix else settings.git_tag_prefix,
+    branch=payload.git.branch if payload.git and payload.git.branch else settings.git_branch
+  )
+  backup_payload = payload.backup
+  backup_settings = BackupSettings(
+    enabled=backup_payload.enabled if backup_payload else False,
+    provider=backup_payload.provider if backup_payload else settings.default_backup_provider,
+    retention_count=backup_payload.retention_count if backup_payload else settings.backup_retention_count,
+    remote_path=backup_payload.remote_path if backup_payload else settings.backup_remote_template,
+    credential_id=backup_payload.credential_id if backup_payload else None
+  )
   scheduled = []
   for project in payload.projects:
     batch_item = BatchItem(
@@ -378,7 +600,11 @@ async def start_batch(payload: BatchConversionPayload) -> Dict[str, Any]:
       api_key=payload.api_key,
       conversion_settings=conversion_settings,
       performance_settings=performance_settings,
-      ai_settings=ai_settings
+      ai_settings=ai_settings,
+      webhooks=[],
+      incremental=payload.incremental or False,
+      git_settings=git_settings,
+      backup_settings=backup_settings
     )
     scheduled.append(session.session_id)
   return {'scheduled_sessions': scheduled}

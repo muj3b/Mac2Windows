@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from backend.conversion.models import ChunkWorkItem
 
@@ -102,3 +102,95 @@ def _directional_guidelines(direction: str, target_language: str) -> str:
 - Convert dependency injection patterns to Swift protocols/structs.
 - Translate WPF/WinUI bindings into SwiftUI state/binding patterns.
 - Map Dispatcher/Task scheduling to DispatchQueue or Task.detached as appropriate."""
+
+
+def build_review_prompt(
+  direction: str,
+  chunk: ChunkWorkItem,
+  converted_code: str,
+  summary: str,
+  context_summaries: Iterable[str]
+) -> str:
+  target_language = infer_target_language(direction, chunk.language or '')
+  context_section = '\n'.join(f'- {ctx}' for ctx in context_summaries if ctx) or '- (no extra context)'
+  return (
+    "You are performing a rigorous code review on the converted {lang} file. Analyse the code for correctness, missing namespaces/imports, platform API misuse, async/threading mishandling, or unimplemented sections.\n\n"
+    "Return your findings strictly as JSON with this structure:\n"
+    "{\n  \"issues\": [\n    {\n      \"message\": \"Concise description\",\n      \"severity\": \"error|warning|info\",\n      \"auto_fix\": { \"full_text\": \"<entire corrected file>\" } | null,\n      \"manual_note\": \"Guidance for manual fix\" | null\n    }\n  ]\n}\n\n"
+    "- Use auto_fix.full_text only when you can provide the complete corrected file that compiles.\n"
+    "- If no issues are found, respond with {\"issues\": []}.\n\n"
+    "Direction: {direction}\n"
+    "File: {file}\n"
+    "Chunk summary: {summary}\n"
+    "Context:\n{context}\n"
+    "Converted code:\n```{lang_lower}\n{code}\n```"
+  ).format(
+    lang=target_language,
+    direction=direction,
+    file=chunk.file_path,
+    summary=summary or '(none)',
+    context=context_section,
+    code=converted_code,
+    lang_lower=target_language.lower()
+  )
+
+
+def build_diff_explanation_prompt(before_snippet: str, after_snippet: str, metadata: Dict[str, object]) -> str:
+  file_path = metadata.get('file_path', 'unknown file')
+  line_number = metadata.get('line_number')
+  direction = metadata.get('direction', 'conversion')
+  return (
+    "You are reviewing a code diff produced by an automated Mac ↔ Windows conversion pipeline. "
+    "Explain why the highlighted change was necessary. Focus on intent, platform-specific adjustments, "
+    "and behavioural differences. Keep the response under 6 sentences.\n\n"
+    f"Direction: {direction}\n"
+    f"File: {file_path}\n"
+    f"Line: {line_number}\n\n"
+    "Original snippet:\n"
+    "```\n"
+    f"{before_snippet.strip() or '(none)'}\n"
+    "```\n\n"
+    "Converted snippet:\n"
+    "```\n"
+    f"{after_snippet.strip() or '(none)'}\n"
+    "```\n\n"
+    "Explain the rationale for this change, referencing platform APIs or language semantics when relevant."
+  )
+
+
+def build_test_prompt(
+  direction: str,
+  chunk: ChunkWorkItem,
+  source_language: str,
+  target_language: str,
+  source_framework: str,
+  target_framework: str
+) -> str:
+  return (
+    "You are converting automated tests between platforms for a Mac ↔ Windows migration.\n"
+    f"Source framework: {source_framework}\n"
+    f"Target framework: {target_framework}\n"
+    f"Source language: {source_language}\n"
+    f"Target language: {target_language}\n\n"
+    "Requirements:\n"
+    "- Preserve test intent, assertions, and fixtures.\n"
+    "- Map XCTest lifecycle methods (setUp/tearDown) to the target framework equivalents.\n"
+    "- Convert assertions (e.g., XCTAssertEqual → Assert.AreEqual, Assert.Equal, XCTAssertTrue → Assert.IsTrue, etc.).\n"
+    "- When an assertion has no direct counterpart, use the closest equivalent and add an inline TODO comment.\n"
+    "- Maintain descriptive test names (convert to PascalCase for .NET).\n"
+    "- Ensure the output compiles in the target framework with necessary imports/usings.\n"
+    "- Avoid using placeholder implementations; translate the logic faithfully.\n"
+    "- If the original test references unavailable APIs post-conversion, add an explanatory TODO comment while keeping the test runnable.\n\n"
+    f"Convert the following {source_framework} test file into {target_framework}:\n"
+    "---------------- SOURCE TEST ----------------\n"
+    f"{chunk.content}\n"
+    "---------------- END SOURCE -----------------\n"
+    "Output only the converted test file content."
+  )
+
+
+def infer_test_frameworks(direction: str, source_language: str) -> Tuple[str, str]:
+  normalized = direction.lower()
+  if normalized == 'mac-to-win':
+    return ('XCTest', 'NUnit')
+  return ('NUnit', 'XCTest')

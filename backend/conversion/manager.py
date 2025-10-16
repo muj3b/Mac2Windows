@@ -5,9 +5,9 @@ import logging
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.ai.model_router import ModelRouter
 from backend.ai.clients import ProviderError
@@ -22,8 +22,11 @@ from backend.conversion.models import (
   ConversionSettings,
   PerformanceSettings,
   AISettings,
+  GitSettings,
+  BackupSettings,
   QualityReport,
   QualityIssue,
+  ManualFixEntry,
   ConversionReport,
   SessionState,
   Stage,
@@ -36,12 +39,13 @@ from backend.conversion.rag import RagContextBuilder
 from backend.conversion.session_store import ConversionSessionStore
 from backend.resources.monitor import ResourceMonitor
 from backend.quality.engine import QualityEngine
-from backend.storage.backup import create_backup
 from backend.performance.benchmark import run_benchmarks
 from backend.conversion.resources import ResourceConverter
 from backend.conversion.dependencies import DependencyGenerator
 from backend.conversion.project import ProjectGenerator
 from backend.conversion.validators import ValidationEngine
+from backend.conversion.assets import AssetOptimizer
+from backend.conversion.tests import TestHarness
 from backend.security.licenses import LicenseScanner
 from backend.security.vulnerabilities import VulnerabilityScanner
 from backend.conversion.git_utils import GitHandler
@@ -64,6 +68,7 @@ class ConversionSession:
   conversion_settings: ConversionSettings
   performance_settings: PerformanceSettings
   ai_settings: AISettings
+  backup_settings: BackupSettings
   progress: ProgressTracker
   work_plan: Dict[Stage, List[ChunkWorkItem]]
   chunks: Dict[str, ChunkRecord] = field(default_factory=dict)
@@ -78,6 +83,11 @@ class ConversionSession:
   task: Optional[asyncio.Task] = None
   last_save: float = field(default_factory=time.time)
   last_chunk_summary: Dict[str, str] = field(default_factory=dict)
+  incremental: bool = False
+  git_settings: GitSettings = field(default_factory=GitSettings)
+  manual_queue: Dict[str, ManualFixEntry] = field(default_factory=dict)
+  test_results: Optional[Dict[str, Any]] = None
+  benchmarks: Dict[str, Any] = field(default_factory=dict)
 
 
 class ConversionManager:
@@ -89,6 +99,7 @@ class ConversionManager:
     embedding_store,
     session_store: ConversionSessionStore,
     resource_monitor: ResourceMonitor,
+    backup_manager,
     event_logger=None,
     learning_memory=None
   ) -> None:
@@ -110,12 +121,34 @@ class ConversionManager:
     self.validation_engine = ValidationEngine()
     self.license_scanner = LicenseScanner()
     self.vulnerability_scanner = VulnerabilityScanner()
-    self.git_handler = GitHandler(Path.cwd())
     self.incremental_cache = IncrementalState.load(settings.incremental_cache_path)
+    self.backup_manager = backup_manager
+    self.session_git_handlers: Dict[str, GitHandler] = {}
+    self.manual_fix_root = settings.data_dir / 'manual_fixes'
+    self.manual_fix_root.mkdir(parents=True, exist_ok=True)
+    self.asset_optimizer = AssetOptimizer()
+    self.test_harness = TestHarness()
     self.sessions: Dict[str, ConversionSession] = {}
 
   def active_sessions(self) -> List[str]:
     return list(self.sessions.keys())
+
+  def _summarize_backups(self, session_id: str) -> List[Dict[str, Any]]:
+    if not getattr(self, 'backup_manager', None):
+      return []
+    records = self.backup_manager.list_backups(session_id=session_id)
+    return [
+      {
+        'id': record.id,
+        'provider': record.provider,
+        'credential_id': record.credential_id,
+        'remote_id': record.remote_id,
+        'remote_url': record.remote_url,
+        'metadata': record.metadata,
+        'created_at': record.created_at
+      }
+      for record in records
+    ]
 
   def get_summary(self, session_id: str) -> Optional[ConversionSummary]:
     session = self.sessions.get(session_id)
@@ -123,6 +156,10 @@ class ConversionManager:
       summary = session.progress.summary()
       summary.quality_report = session.quality_report
       summary.conversion_report = session.conversion_report
+      summary.manual_fixes_pending = sum(1 for entry in session.manual_queue.values() if entry.status != 'applied')
+      summary.backups = self._summarize_backups(session_id)
+      summary.test_results = session.test_results
+      summary.benchmarks = session.benchmarks
       return summary
     state = self.session_store.load(session_id)
     if not state:
@@ -137,6 +174,10 @@ class ConversionManager:
     summary = tracker.summary()
     summary.quality_report = state.quality_report
     summary.conversion_report = state.conversion_report
+    summary.manual_fixes_pending = sum(1 for entry in state.manual_queue.values() if entry.status != 'applied')
+    summary.backups = self._summarize_backups(session_id)
+    summary.test_results = state.test_results
+    summary.benchmarks = state.benchmarks
     return summary
 
   def pause_session(self, session_id: str) -> bool:
@@ -155,6 +196,65 @@ class ConversionManager:
     session.progress.resume()
     return True
 
+  def list_manual_fixes(self, session_id: str) -> List[Dict[str, Any]]:
+    session = self.sessions.get(session_id)
+    if session:
+      return [entry.to_dict() for entry in session.manual_queue.values()]
+    state = self.session_store.load(session_id)
+    if state:
+      return [entry.to_dict() for entry in state.manual_queue.values()]
+    return []
+
+  def submit_manual_fix(self, session_id: str, chunk_id: str, code: str, submitted_by: Optional[str] = None, note: Optional[str] = None) -> bool:
+    session = self.sessions.get(session_id)
+    if not session:
+      raise ValueError('Session is not active; manual fixes require an active session.')
+    record = session.chunks.get(chunk_id)
+    if not record:
+      raise ValueError('Chunk not found')
+    entry = session.manual_queue.get(chunk_id)
+    if not entry:
+      entry = ManualFixEntry(chunk_id=chunk_id, file_path=str(record.chunk.file_path), reason='Manual override')
+      session.manual_queue[chunk_id] = entry
+    entry.status = 'applied'
+    entry.submitted_by = submitted_by
+    entry.timestamp = time.time()
+    if note:
+      entry.notes.append(note)
+    override_dir = self.manual_fix_root / session_id
+    override_dir.mkdir(parents=True, exist_ok=True)
+    override_path = override_dir / f'{chunk_id}.txt'
+    override_path.write_text(code, encoding='utf-8')
+    entry.override_path = str(override_path)
+
+    output_path = self._determine_output_path(session, record.chunk)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(code, encoding='utf-8')
+
+    record.status = ChunkStatus.COMPLETED
+    record.output_path = output_path
+    record.summary = 'Manual override applied'
+    record.raw_output = code
+    record.last_error = None
+    self.incremental_cache.update_checksum(record.chunk.file_path, calculate_checksum(record.chunk.file_path))
+    session.summary_notes.append(f'Manual fix applied for {record.chunk.file_path}')
+    session.progress.update_chunk(record)
+    if session.quality_report and chunk_id in session.quality_report.flagged_chunks:
+      session.quality_report.flagged_chunks.remove(chunk_id)
+    self.session_store.upsert(session)
+    try:
+      self.incremental_cache.save(settings.incremental_cache_path)
+    except Exception as exc:  # pragma: no cover
+      if self.event_logger:
+        self.event_logger.log_error('incremental_save_failed', {'error': str(exc)})
+    if self.event_logger:
+      self.event_logger.log_event('manual_fix_applied', 'Manual fix applied', {
+        'session_id': session_id,
+        'chunk_id': chunk_id,
+        'submitted_by': submitted_by
+      })
+    return True
+
   def start_session(
     self,
     project_path: Path,
@@ -167,7 +267,9 @@ class ConversionManager:
     performance_settings: Optional[PerformanceSettings] = None,
     ai_settings: Optional[AISettings] = None,
     webhooks: Optional[List[str]] = None,
-    incremental: bool = False
+    incremental: bool = False,
+    git_settings: Optional[GitSettings] = None,
+    backup_settings: Optional[BackupSettings] = None
   ) -> ConversionSession:
     session_id = uuid.uuid4().hex[:12]
     work_plan = generate_work_plan(project_path, direction)
@@ -183,6 +285,23 @@ class ConversionManager:
 
     self.rag_builder.index_project(project_path)
 
+    git_settings = git_settings or GitSettings(
+      enabled=settings.git_enabled,
+      tag_after_completion=False,
+      tag_prefix=settings.git_tag_prefix,
+      branch=settings.git_branch
+    )
+    conversion_settings = conversion_settings or ConversionSettings()
+    performance_settings = performance_settings or PerformanceSettings()
+    ai_settings = ai_settings or AISettings()
+    backup_settings = backup_settings or BackupSettings()
+    if not backup_settings.provider:
+      backup_settings.provider = settings.default_backup_provider
+    if backup_settings.retention_count <= 0:
+      backup_settings.retention_count = settings.backup_retention_count
+    if not backup_settings.remote_path:
+      backup_settings.remote_path = settings.backup_remote_template
+
     session = ConversionSession(
       session_id=session_id,
       project_path=project_path,
@@ -195,13 +314,15 @@ class ConversionManager:
         temperature=ai_settings.temperature,
         max_tokens=4096
       ),
-      conversion_settings=conversion_settings or ConversionSettings(),
-      performance_settings=performance_settings or PerformanceSettings(),
-      ai_settings=ai_settings or AISettings(),
+      conversion_settings=conversion_settings,
+      performance_settings=performance_settings,
+      ai_settings=ai_settings,
+      backup_settings=backup_settings,
       webhooks=webhooks or [],
       progress=progress,
       work_plan=work_plan,
-      incremental=incremental
+      incremental=incremental,
+      git_settings=git_settings
     )
 
     for stage, chunks in work_plan.items():
@@ -221,8 +342,10 @@ class ConversionManager:
     if session.incremental:
       self._mark_skipped_chunks(session)
     session.task = asyncio.create_task(self._run_session(session))
-    if self.git_handler:
-      self.git_handler.commit_snapshot(f'Start conversion {session_id}')
+    if session.git_settings.enabled:
+      handler = GitHandler(session.target_path, session.git_settings.branch)
+      self.session_git_handlers[session.session_id] = handler
+      handler.commit_snapshot(f'Pre-conversion snapshot {session.direction} {session_id}')
     logger.info('Started conversion session %s', session_id)
     if self.event_logger:
       self.event_logger.log_event(
@@ -238,6 +361,7 @@ class ConversionManager:
     return session
 
   async def _run_session(self, session: ConversionSession) -> None:
+    success = False
     try:
       for stage in STAGE_ORDER:
         if stage == Stage.QUALITY:
@@ -259,14 +383,23 @@ class ConversionManager:
         session.progress.start_stage(stage)
         for chunk in chunks:
           record = session.chunks[chunk.chunk_id]
-          if record.status == ChunkStatus.COMPLETED:
+          if record.status in {ChunkStatus.COMPLETED, ChunkStatus.SKIPPED}:
+            if record.status == ChunkStatus.SKIPPED:
+              session.progress.stage_progress[chunk.stage].completed_units += 1
+              session.progress.completed_chunks += 1
+              session.progress.update_chunk(record)
+            continue
+          if record.status == ChunkStatus.FAILED:
             continue
           await self._respect_pause(session)
           await self._respect_system_load()
           await self._process_chunk(session, record)
           await self._persist_session(session)
         session.progress.complete_stage(stage)
+        if stage == Stage.TESTS:
+          await self._finalize_tests(session)
         await self._persist_session(session)
+      success = True
     except asyncio.CancelledError:
       logger.info('Conversion session %s cancelled', session.session_id)
     except Exception as err:  # pragma: no cover - defensive
@@ -281,6 +414,7 @@ class ConversionManager:
         )
     finally:
       session.updated_at = time.time()
+      self._finalize_session(session, success)
 
   async def _respect_pause(self, session: ConversionSession) -> None:
     while session.paused:
@@ -295,6 +429,31 @@ class ConversionManager:
 
   async def _process_chunk(self, session: ConversionSession, record: ChunkRecord) -> None:
     chunk = record.chunk
+    manual_entry = session.manual_queue.get(chunk.chunk_id)
+    if manual_entry:
+      if manual_entry.status == 'applied' and manual_entry.override_path and Path(manual_entry.override_path).exists():
+        code = Path(manual_entry.override_path).read_text(encoding='utf-8')
+        output_path = self._determine_output_path(session, chunk)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(code, encoding='utf-8')
+        record.status = ChunkStatus.COMPLETED
+        record.summary = 'Manual override applied'
+        record.raw_output = code
+        record.output_path = output_path
+        record.last_error = None
+        session.progress.update_chunk(record)
+        session.summary_notes.append(f'Manual override applied for {chunk.file_path}')
+        return
+      if manual_entry.status == 'pending':
+        record.status = ChunkStatus.FAILED
+        record.last_error = 'Awaiting manual fix'
+        if self.event_logger:
+          self.event_logger.log_event('manual_fix_pending', 'Chunk awaiting manual fix', {
+            'session_id': session.session_id,
+            'chunk_id': chunk.chunk_id
+          })
+        return
+
     if chunk.stage == Stage.RESOURCES:
       await self._handle_resource_chunk(session, record)
       return
@@ -305,7 +464,7 @@ class ConversionManager:
       await self._handle_project_chunk(session, record)
       return
     if chunk.stage == Stage.TESTS:
-      await self._handle_validation_chunk(session, record)
+      await self._handle_test_chunk(session, record)
       return
 
     context = self.rag_builder.query_context(chunk)
@@ -328,9 +487,10 @@ class ConversionManager:
       record.status = ChunkStatus.FAILED
       record.last_error = str(exc)
       session.summary_notes.append(f'Provider error on {chunk.chunk_id}: {exc}')
+      self._enqueue_manual_fix(session, record, 'Provider error', str(exc))
       if self.event_logger:
         self.event_logger.log_error('provider_error', {'session_id': session.session_id, 'chunk_id': chunk.chunk_id, 'error': str(exc)})
-      raise
+      return
 
     output_text = result['output_text']
     summary = result['summary']
@@ -378,6 +538,9 @@ class ConversionManager:
     else:
       if record.chunk.checksum:
         self.incremental_cache.update_checksum(record.chunk.file_path, record.chunk.checksum)
+
+    if chunk.stage == Stage.CODE and session.conversion_settings.self_review and record.status == ChunkStatus.COMPLETED:
+      await self._run_self_review(session, record)
     if self.event_logger:
       self.event_logger.log_event(
         'chunk_complete',
@@ -428,9 +591,22 @@ class ConversionManager:
     )
     session.chunks['quality-report'] = quality_record
     session.progress.update_chunk(quality_record)
+    benchmarks = run_benchmarks(session.project_path, session.target_path, session.direction)
+    session.benchmarks = benchmarks
+    regressions = benchmarks.get('regressions') or []
+    if regressions:
+      for item in regressions:
+        message = (
+          f"Performance regression detected for {item['metric']} (Δ {item['delta_pct'] * 100:.1f}% vs baseline)"
+        )
+        session.summary_notes.append(message)
+        session.quality_report.issues.append(
+          QualityIssue(category='performance', message=message, severity='warning')
+        )
+    else:
+      session.summary_notes.append('Benchmarks completed without regressions.')
     await self._generate_reports(session)
-    backup_path = create_backup(session.target_path, session.target_path / 'backups')
-    session.summary_notes.append(f'Backup created: {backup_path}')
+    await self._perform_backup(session)
     await self._trigger_webhooks(session)
     await self._persist_session(session)
     session.updated_at = time.time()
@@ -443,6 +619,34 @@ class ConversionManager:
           'issues': [issue.__dict__ for issue in report.issues]
         }
       )
+
+  async def _perform_backup(self, session: ConversionSession) -> None:
+    if not self.backup_manager:
+      return
+    try:
+      backup_result = await asyncio.to_thread(self.backup_manager.create_backup, session, session.backup_settings)
+    except Exception as exc:  # pragma: no cover - protective path
+      message = f'Backup failed: {exc}'
+      session.summary_notes.append(message)
+      if self.event_logger:
+        self.event_logger.log_error('backup_failed', {'session_id': session.session_id, 'error': str(exc)})
+      return
+
+    session.summary_notes.append(f'Backup archive created: {backup_result.archive_path}')
+    if backup_result.uploaded:
+      remote_url = backup_result.uploaded.remote_url or backup_result.uploaded.remote_id
+      if remote_url:
+        session.summary_notes.append(f'Cloud backup available: {remote_url}')
+    if self.event_logger:
+      payload = {
+        'session_id': session.session_id,
+        'archive': str(backup_result.archive_path),
+        'metadata': backup_result.metadata,
+      }
+      if backup_result.uploaded:
+        payload['provider'] = backup_result.uploaded.provider
+        payload['remote'] = backup_result.uploaded.remote_url or backup_result.uploaded.remote_id
+      self.event_logger.log_event('backup_created', 'Conversion backup completed', payload)
 
   async def _resume_incomplete_chunk(self, session: ConversionSession, record: ChunkRecord) -> None:
     chunk = record.chunk
@@ -526,7 +730,49 @@ class ConversionManager:
       issues = self.validation_engine.validate_mac_project(session.target_path)
     for issue in issues:
       session.summary_notes.append(f'Validation issue: {issue.message}')
+      if issue.file_path:
+        record = self._find_record_by_path(session, Path(issue.file_path))
+        if record:
+          self._enqueue_manual_fix(session, record, 'Validation failure', issue.message)
     return issues
+
+  async def _run_self_review(self, session: ConversionSession, record: ChunkRecord) -> None:
+    chunk = record.chunk
+    context = [note for note in session.summary_notes[-5:]]
+    review = await self.orchestrator.review_chunk(
+      chunk=chunk,
+      converted_code=record.raw_output or '',
+      config=session.orchestrator_config,
+      ai_settings=session.ai_settings,
+      direction=session.direction,
+      context_summaries=context
+    )
+    issues = review.get('issues', []) if isinstance(review, dict) else []
+    applied_auto_fix = False
+    for issue in issues:
+      message = issue.get('message', 'Unspecified issue')
+      severity = issue.get('severity', 'info')
+      auto_fix = issue.get('auto_fix') if isinstance(issue, dict) else None
+      manual_note = issue.get('manual_note')
+      if auto_fix and isinstance(auto_fix, dict) and auto_fix.get('full_text'):
+        new_code = auto_fix['full_text']
+        output_path = record.output_path or self._determine_output_path(session, chunk)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(new_code, encoding='utf-8')
+        record.raw_output = new_code
+        record.output_path = output_path
+        session.summary_notes.append(f'Auto-fix applied: {message}')
+        applied_auto_fix = True
+      else:
+        note = manual_note or message
+        self._enqueue_manual_fix(session, record, 'Review finding', note)
+      if session.quality_report:
+        session.quality_report.issues.append(QualityIssue(category='self-review', message=message, severity=severity, file_path=str(chunk.file_path)))
+
+    if applied_auto_fix:
+      if record.chunk.checksum:
+        self.incremental_cache.update_checksum(record.chunk.file_path, record.chunk.checksum)
+      session.progress.update_chunk(record)
 
   def _extract_symbols(self, chunk: ChunkWorkItem) -> Dict[str, SymbolTableEntry]:
     symbols = {}
@@ -539,9 +785,100 @@ class ConversionManager:
       )
     return symbols
 
+  def _find_record_by_path(self, session: ConversionSession, file_path: Path) -> Optional[ChunkRecord]:
+    for record in session.chunks.values():
+      if record.chunk.file_path == file_path:
+        return record
+      if record.output_path and record.output_path == file_path:
+        return record
+    return None
+
+  def _mark_skipped_chunks(self, session: ConversionSession) -> None:
+    for record in session.chunks.values():
+      chunk = record.chunk
+      if chunk.stage != Stage.CODE or not chunk.file_path.exists():
+        continue
+      checksum = calculate_checksum(chunk.file_path)
+      chunk.checksum = checksum
+      if not self.incremental_cache.is_changed(chunk.file_path, checksum):
+        record.status = ChunkStatus.SKIPPED
+        record.summary = 'Skipped (unchanged)'
+        if self.event_logger:
+          self.event_logger.log_event('incremental_skip', 'Chunk skipped', {'chunk_id': chunk.chunk_id})
+        session.summary_notes.append(f'Skipped unchanged file {chunk.chunk.file_path}')
+    # stage progress will be updated when skipping during run
+
+  def _finalize_session(self, session: ConversionSession, success: bool) -> None:
+    if session.git_settings.enabled:
+      handler = self.session_git_handlers.pop(session.session_id, None)
+      if handler:
+        try:
+          outcome = 'success' if success else 'failure'
+          commit = handler.commit_snapshot(f'Conversion {outcome} {session.direction} {session.session_id}')
+          if self.event_logger and commit:
+            self.event_logger.log_event('git_commit', 'Conversion snapshot committed', {'session_id': session.session_id, 'commit': commit})
+          if success and session.git_settings.tag_after_completion:
+            tag_name = f"{session.git_settings.tag_prefix}-{session.session_id}"
+            handler.tag(tag_name, f'Conversion completed for {session.session_id}')
+            if self.event_logger:
+              self.event_logger.log_event('git_tag', 'Conversion tagged', {'session_id': session.session_id, 'tag': tag_name})
+        except Exception as exc:  # pragma: no cover - protective
+          if self.event_logger:
+            self.event_logger.log_error('git_finalize_failed', {'session_id': session.session_id, 'error': str(exc)})
+
+    self.incremental_cache.prune_missing(
+      [record.chunk.file_path for record in session.chunks.values() if record.chunk.stage == Stage.CODE]
+    )
+    try:
+        self.incremental_cache.save(settings.incremental_cache_path)
+    except Exception as exc:  # pragma: no cover - protective
+      if self.event_logger:
+        self.event_logger.log_error('incremental_save_failed', {'error': str(exc)})
+
+  def _enqueue_manual_fix(self, session: ConversionSession, record: ChunkRecord, reason: str, note: Optional[str] = None) -> None:
+    entry = session.manual_queue.get(record.chunk.chunk_id)
+    if not entry:
+      entry = ManualFixEntry(
+        chunk_id=record.chunk.chunk_id,
+        file_path=str(record.chunk.file_path),
+        reason=reason,
+        notes=[note] if note else []
+      )
+      session.manual_queue[record.chunk.chunk_id] = entry
+    else:
+      if note:
+        entry.notes.append(note)
+    if note is None and reason not in entry.notes:
+      entry.notes.append(reason)
+    if session.quality_report is None:
+      session.quality_report = QualityReport()
+    if record.chunk.chunk_id not in session.quality_report.flagged_chunks:
+      session.quality_report.flagged_chunks.append(record.chunk.chunk_id)
+    session.summary_notes.append(f'Manual fix required for {record.chunk.file_path}: {reason}')
+    if self.event_logger:
+      self.event_logger.log_event('manual_fix_enqueued', 'Manual intervention required', {
+        'session_id': session.session_id,
+        'chunk_id': record.chunk.chunk_id,
+        'reason': reason
+      })
+    self.session_store.upsert(session)
+
   async def _handle_resource_chunk(self, session: ConversionSession, record: ChunkRecord) -> None:
     target_path = self._determine_output_path(session, record.chunk)
     outputs = self.resource_converter.convert(session.direction, record.chunk, target_path)
+    savings_total = 0
+    savings_percent = 0.0
+    if session.conversion_settings.optimize_assets:
+      for output in outputs:
+        if output.is_file():
+          result = self.asset_optimizer.optimize(output)
+          if result and result.savings_bytes > 0:
+            savings_total += result.savings_bytes
+            savings_percent += result.savings_percent
+    if savings_total > 0:
+      session.summary_notes.append(
+        f'Optimized assets for {record.chunk.file_path} (saved {savings_total} bytes)'
+      )
     record.status = ChunkStatus.COMPLETED
     record.output_path = outputs[0] if outputs else target_path
     record.summary = f'Resource converted to {record.output_path}'
@@ -556,13 +893,17 @@ class ConversionManager:
     license_issues = self.license_scanner.scan(session.target_path)
     vuln_issues: List[QualityIssue] = []
     if output.suffix == '.config':
-      vuln_issues = self.vulnerability_scanner.scan_packages_config(output)
+      vuln_issues = await self.vulnerability_scanner.scan_packages_config(output)
     elif output.suffix == '.swift':
-      vuln_issues = self.vulnerability_scanner.scan_package_swift(output)
+      vuln_issues = await self.vulnerability_scanner.scan_package_swift(output)
     for issue in license_issues + vuln_issues:
       session.summary_notes.append(f'License/security: {issue.message}')
-      if session.quality_report:
-        session.quality_report.issues.append(issue)
+      if session.quality_report is None:
+        session.quality_report = QualityReport()
+      session.quality_report.issues.append(issue)
+      if issue.severity.lower() == 'error':
+        record.status = ChunkStatus.FAILED
+        self._enqueue_manual_fix(session, record, 'Security issue', issue.message)
     record.status = ChunkStatus.COMPLETED
     record.output_path = output
     record.summary = f'Dependencies generated at {output.name}'
@@ -580,12 +921,93 @@ class ConversionManager:
     session.summary_notes.append(record.summary)
     session.progress.update_chunk(record)
 
+  async def _handle_test_chunk(self, session: ConversionSession, record: ChunkRecord) -> None:
+    chunk = record.chunk
+    try:
+      source_text = chunk.file_path.read_text(encoding='utf-8')
+    except OSError as exc:
+      record.status = ChunkStatus.FAILED
+      record.last_error = str(exc)
+      session.summary_notes.append(f'Unable to read test file {chunk.file_path}: {exc}')
+      self._enqueue_manual_fix(session, record, 'Test conversion', str(exc))
+      return
+
+    chunk.content = source_text
+    try:
+      result = await self.orchestrator.convert_test(
+        chunk=chunk,
+        config=session.orchestrator_config,
+        ai_settings=session.ai_settings,
+        direction=session.direction
+      )
+    except ProviderError as exc:
+      record.status = ChunkStatus.FAILED
+      record.last_error = str(exc)
+      session.summary_notes.append(f'Test conversion failed for {chunk.chunk_id}: {exc}')
+      self._enqueue_manual_fix(session, record, 'Test conversion failure', str(exc))
+      if self.event_logger:
+        self.event_logger.log_error('test_conversion_failed', {'session_id': session.session_id, 'chunk_id': chunk.chunk_id, 'error': str(exc)})
+      return
+
+    output_text = result['output_text']
+    output_path = self._determine_output_path(session, chunk)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(output_text, encoding='utf-8')
+
+    record.raw_output = output_text
+    record.status = ChunkStatus.COMPLETED
+    record.summary = f'Test converted: {output_path.name}'
+    record.output_path = output_path
+    record.tokens_used = result.get('tokens_used', 0)
+    record.input_tokens = result.get('input_tokens', 0)
+    record.output_tokens = result.get('output_tokens', 0)
+    record.cost_usd = result.get('cost_usd', 0.0)
+    record.ai_model = result.get('model_identifier')
+    record.provider_id = result.get('provider_id')
+    record.last_error = None
+
+    checksum = calculate_checksum(chunk.file_path)
+    chunk.checksum = checksum
+    self.incremental_cache.update_checksum(chunk.file_path, checksum)
+
+    session.summary_notes.append(record.summary)
+    session.last_chunk_summary[chunk.file_path.as_posix()] = record.summary
+    session.progress.update_chunk(record)
+
   async def _handle_validation_chunk(self, session: ConversionSession, record: ChunkRecord) -> None:
     issues = await self._run_validation_stage(session)
     record.status = ChunkStatus.COMPLETED
     record.summary = 'Validation completed' if not issues else 'Validation completed with issues'
     session.summary_notes.append(record.summary)
     session.progress.update_chunk(record)
+
+  async def _finalize_tests(self, session: ConversionSession) -> None:
+    test_result = await asyncio.to_thread(self.test_harness.run, session)
+    if not test_result:
+      return
+    result = asdict(test_result)
+    session.test_results = result
+    if result['status'] == 'skipped':
+      session.summary_notes.append(f'Tests skipped: {result.get("skipped_reason") or "tooling unavailable"}')
+      session.quality_report.issues.append(
+        QualityIssue(category='tests', message=result.get('skipped_reason') or 'Tests skipped', severity='info')
+      )
+      return
+
+    failures = result.get('failures') or []
+    summary_line = f"Tests {result['status']}: {len(failures)} failure(s) detected" if failures else f"Tests {result['status']}: 0 failures"
+    session.summary_notes.append(summary_line)
+    if failures:
+      for failure in failures:
+        session.quality_report.issues.append(
+          QualityIssue(category='tests', message=failure, severity='error')
+        )
+    else:
+      session.quality_report.issues.append(
+        QualityIssue(category='tests', message='All automated tests passed', severity='info')
+      )
+    for todo in result.get('todo') or []:
+      session.summary_notes.append(f'TODO: {todo}')
 
   async def _persist_session(self, session: ConversionSession) -> None:
     now = time.time()
@@ -607,8 +1029,14 @@ class ConversionManager:
       conversion_settings=session.conversion_settings,
       performance_settings=session.performance_settings,
       ai_settings=session.ai_settings,
+      backup_settings=session.backup_settings,
       webhooks=session.webhooks,
-      conversion_report=session.conversion_report
+      conversion_report=session.conversion_report,
+      incremental=session.incremental,
+      git_settings=session.git_settings,
+      manual_queue=session.manual_queue,
+      test_results=session.test_results,
+      benchmarks=session.benchmarks
     )
     self.session_store.upsert(state)
     session.last_save = now
@@ -618,8 +1046,6 @@ class ConversionManager:
 
     session.conversion_report = generate_conversion_report(session)
     session.summary_notes.append(f"Quality report generated: {session.conversion_report.summary_html}")
-    benchmark = run_benchmarks(session.project_path, session.target_path)
-    session.summary_notes.append(f"Benchmark: mac={benchmark['mac_duration']} win={benchmark['win_duration']}")
 
   async def _trigger_webhooks(self, session: ConversionSession) -> None:
     if not session.webhooks:

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const axios = require('axios');
@@ -182,6 +182,35 @@ const setupIpcHandlers = () => {
     }
   });
 
+  ipcMain.handle('backend:listManualFixes', async (_event, sessionId) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/conversion/manual/${sessionId}`);
+      return response.data;
+    } catch (error) {
+      return {
+        error: true,
+        message: error.response?.data?.detail || error.message || 'Manual fixes unavailable'
+      };
+    }
+  });
+
+  ipcMain.handle('backend:submitManualFix', async (_event, payload) => {
+    try {
+      const { session_id: sessionId, chunk_id: chunkId, code, note, submitted_by: submittedBy } = payload;
+      const response = await axios.post(`${BACKEND_URL}/conversion/manual/${sessionId}/${chunkId}`, {
+        code,
+        note,
+        submitted_by: submittedBy
+      });
+      return response.data;
+    } catch (error) {
+      return {
+        error: true,
+        message: error.response?.data?.detail || error.message || 'Manual fix submission failed'
+      };
+    }
+  });
+
   ipcMain.handle('backend:listTemplates', async () => {
     try {
       const response = await axios.get(`${BACKEND_URL}/settings/templates`);
@@ -209,6 +238,67 @@ const setupIpcHandlers = () => {
     } catch (error) {
       return { error: true, message: error.message };
     }
+  });
+
+  ipcMain.handle('backend:listBackupProviders', async () => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/backups/providers`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:startBackupOAuth', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/backups/providers/${payload.provider}/oauth/start`, payload.config);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:createBackupCredential', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/backups/providers/${payload.provider}/credentials`, payload.body);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:deleteBackupCredential', async (_event, credentialId) => {
+    try {
+      const response = await axios.delete(`${BACKEND_URL}/backups/credentials/${credentialId}`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:listSessionBackups', async (_event, sessionId) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/backups/sessions/${sessionId}`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('app:openExternal', async (_event, url) => {
+    await shell.openExternal(url);
+    return { success: true };
+  });
+
+  ipcMain.handle('app:openPath', async (_event, targetPath) => {
+    if (!targetPath) {
+      return { error: true, message: 'Path is required' };
+    }
+    const result = await shell.openPath(targetPath);
+    if (result) {
+      return { error: true, message: result };
+    }
+    return { success: true };
   });
 
   ipcMain.handle('backend:fetchLogs', async (_event, limit = 200) => {

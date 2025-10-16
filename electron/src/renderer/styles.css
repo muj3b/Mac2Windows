@@ -437,11 +437,30 @@ body {
   flex: 1;
 }
 
+.input-with-actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.input-with-actions select,
+.input-with-actions input {
+  flex: 1;
+}
+
+.backup-panel .form-group.hidden {
+  display: none;
+}
+
 .toggle-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
+}
+
+.link-button {
+  margin-top: 8px;
 }
 
 .logs-panel {

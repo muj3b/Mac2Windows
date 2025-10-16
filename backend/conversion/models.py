@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 
 class Stage(Enum):
@@ -99,6 +99,30 @@ class QualityIssue:
 
 
 @dataclass
+class ManualFixEntry:
+  chunk_id: str
+  file_path: str
+  reason: str
+  notes: List[str] = field(default_factory=list)
+  status: str = 'pending'  # pending, applied
+  override_path: Optional[str] = None
+  submitted_by: Optional[str] = None
+  timestamp: Optional[float] = None
+
+  def to_dict(self) -> Dict[str, Any]:
+    return {
+      'chunk_id': self.chunk_id,
+      'file_path': self.file_path,
+      'reason': self.reason,
+      'notes': self.notes,
+      'status': self.status,
+      'override_path': self.override_path,
+      'submitted_by': self.submitted_by,
+      'timestamp': self.timestamp
+    }
+
+
+@dataclass
 class QualityReport:
   issues: List[QualityIssue] = field(default_factory=list)
   syntax_passed: bool = True
@@ -145,6 +169,10 @@ class ConversionSettings:
   comments: str = 'keep'
   naming: str = 'preserve'
   error_handling: str = 'adapt'
+  self_review: bool = True
+  optimize_assets: bool = True
+  image_quality: int = 85
+  max_image_megapixels: float = 4.0
 
 
 @dataclass
@@ -163,6 +191,23 @@ class AISettings:
 
 
 @dataclass
+class GitSettings:
+  enabled: bool = True
+  tag_after_completion: bool = False
+  tag_prefix: str = 'conversion'
+  branch: Optional[str] = None
+
+
+@dataclass
+class BackupSettings:
+  enabled: bool = False
+  provider: str = 'local'
+  retention_count: int = 10
+  remote_path: str = '{project}/{direction}'
+  credential_id: Optional[str] = None
+
+
+@dataclass
 class ConversionSummary:
   total_files: int
   converted_files: int
@@ -178,6 +223,10 @@ class ConversionSummary:
   errors: List[str] = field(default_factory=list)
   quality_report: Optional[QualityReport] = None
   conversion_report: Optional[ConversionReport] = None
+  manual_fixes_pending: int = 0
+  backups: List[Dict[str, Any]] = field(default_factory=list)
+  test_results: Optional[Dict[str, Any]] = None
+  benchmarks: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -205,6 +254,11 @@ class SessionState:
   conversion_settings: ConversionSettings = field(default_factory=ConversionSettings)
   performance_settings: PerformanceSettings = field(default_factory=PerformanceSettings)
   ai_settings: AISettings = field(default_factory=AISettings)
+  backup_settings: BackupSettings = field(default_factory=BackupSettings)
   webhooks: List[str] = field(default_factory=list)
   conversion_report: Optional[ConversionReport] = None
   incremental: bool = False
+  git_settings: GitSettings = field(default_factory=GitSettings)
+  manual_queue: Dict[str, ManualFixEntry] = field(default_factory=dict)
+  test_results: Optional[Dict[str, Any]] = None
+  benchmarks: Dict[str, Any] = field(default_factory=dict)

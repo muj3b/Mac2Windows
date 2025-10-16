@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from backend.ai.clients import (
   BaseLLMClient,
@@ -13,7 +14,14 @@ from backend.ai.clients import (
   ProviderError,
   ProviderResult
 )
-from backend.ai.prompts import build_conversion_prompt, infer_target_language
+from backend.ai.prompts import (
+  build_conversion_prompt,
+  build_diff_explanation_prompt,
+  build_review_prompt,
+  build_test_prompt,
+  infer_target_language,
+  infer_test_frameworks
+)
 from backend.conversion.mappings import ApiMappingCatalog, DependencyMapping
 from backend.conversion.models import ChunkWorkItem, AISettings
 from backend.ai.model_router import ModelRouter, ModelRoute
@@ -118,6 +126,44 @@ class AIOrchestrator:
       'provider_id': route.provider_id
     }
 
+  async def convert_test(
+    self,
+    chunk: ChunkWorkItem,
+    config: OrchestrationConfig,
+    ai_settings: AISettings,
+    direction: str
+  ) -> Dict[str, object]:
+    route = self.model_router.route(chunk, ai_settings, config.provider_id, config.model_identifier)
+    source_language = chunk.language or 'source'
+    target_language = infer_target_language(direction, source_language)
+    source_framework, target_framework = infer_test_frameworks(direction, source_language)
+    prompt = build_test_prompt(
+      direction=direction,
+      chunk=chunk,
+      source_language=source_language,
+      target_language=target_language,
+      source_framework=source_framework,
+      target_framework=target_framework
+    )
+    result = await self._invoke_model(
+      route=route,
+      prompt=prompt,
+      temperature=min(ai_settings.temperature + 0.1, 0.8),
+      max_tokens=config.max_tokens
+    )
+    normalized_output = self._normalize_output(result.output_text, direction, chunk)
+    summary = self._summarize_output(chunk, normalized_output)
+    return {
+      'output_text': normalized_output,
+      'summary': summary,
+      'tokens_used': result.total_tokens,
+      'input_tokens': result.input_tokens,
+      'output_tokens': result.output_tokens,
+      'cost_usd': result.cost_usd,
+      'model_identifier': route.model_identifier,
+      'provider_id': route.provider_id
+    }
+
   def _prompt_metadata(
     self,
     chunk: ChunkWorkItem,
@@ -193,6 +239,28 @@ class AIOrchestrator:
       f"<partial_output>\n{partial_output}\n</partial_output>"
     )
 
+  async def explain_diff(
+    self,
+    config: OrchestrationConfig,
+    before_snippet: str,
+    after_snippet: str,
+    metadata: Dict[str, object]
+  ) -> Dict[str, object]:
+    route = ModelRoute(provider_id=config.provider_id, model_identifier=config.model_identifier)
+    prompt = build_diff_explanation_prompt(before_snippet, after_snippet, metadata)
+    result = await self._invoke_model(
+      route=route,
+      prompt=prompt,
+      temperature=max(0.1, config.temperature / 2),
+      max_tokens=min(config.max_tokens, 1024)
+    )
+    explanation = result.output_text.strip()
+    return {
+      'explanation': explanation,
+      'tokens_used': result.total_tokens,
+      'cost_usd': result.cost_usd
+    }
+
   def _get_client(self, provider_id: str) -> BaseLLMClient:
     if provider_id in self._clients:
       return self._clients[provider_id]
@@ -238,3 +306,24 @@ class AIOrchestrator:
           await close()
         except Exception:  # pragma: no cover - driver shutdown
           logger.debug('Failed to close client cleanly', exc_info=True)
+
+  async def review_chunk(
+    self,
+    chunk: ChunkWorkItem,
+    converted_code: str,
+    config: OrchestrationConfig,
+    ai_settings: AISettings,
+    direction: str,
+    context_summaries: Iterable[str]
+  ) -> Dict[str, object]:
+    route = self.model_router.route(chunk, ai_settings, config.provider_id, config.model_identifier)
+    prompt = build_review_prompt(direction, chunk, converted_code, chunk.summary or '', context_summaries)
+    result = await self._invoke_model(route, prompt, ai_settings.temperature, config.max_tokens)
+    response_text = result.output_text.strip()
+    try:
+      data = json.loads(response_text)
+      if isinstance(data, dict) and 'issues' in data:
+        return data
+    except json.JSONDecodeError:
+      logger.warning('Review response not JSON, treating as manual note')
+    return {'issues': [{'message': response_text, 'severity': 'info', 'auto_fix': None, 'manual_note': response_text}]}

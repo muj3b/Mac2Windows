@@ -20,5 +20,18 @@ contextBridge.exposeInMainWorld('macWinBridge', {
   saveTemplate: (payload) => safeInvoke('backend:saveTemplate', payload),
   fetchLogs: (limit = 200) => safeInvoke('backend:fetchLogs', limit),
   setDebugMode: (enabled) => safeInvoke('backend:setDebugMode', { enabled }),
-  prepareRollback: (sessionId, backupPath = null) => safeInvoke('backend:prepareRollback', { session_id: sessionId, backup_path: backupPath })
+  prepareRollback: (sessionId, backupPath = null) => safeInvoke('backend:prepareRollback', { session_id: sessionId, backup_path: backupPath }),
+  listManualFixes: (sessionId) => safeInvoke('backend:listManualFixes', sessionId),
+  submitManualFix: (sessionId, chunkId, payload) => safeInvoke('backend:submitManualFix', {
+    session_id: sessionId,
+    chunk_id: chunkId,
+    ...payload
+  }),
+  listBackupProviders: () => safeInvoke('backend:listBackupProviders'),
+  startBackupOAuth: (provider, config) => safeInvoke('backend:startBackupOAuth', { provider, config }),
+  createBackupCredential: (provider, body) => safeInvoke('backend:createBackupCredential', { provider, body }),
+  deleteBackupCredential: (credentialId) => safeInvoke('backend:deleteBackupCredential', credentialId),
+  listSessionBackups: (sessionId) => safeInvoke('backend:listSessionBackups', sessionId),
+  openExternal: (url) => safeInvoke('app:openExternal', url),
+  openPath: (targetPath) => safeInvoke('app:openPath', targetPath)
 });

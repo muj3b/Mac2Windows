@@ -28,12 +28,26 @@ class Settings:
   ai_retry_attempts: int = int(os.getenv('CONVERTER_AI_RETRY_ATTEMPTS', '3'))
   ai_retry_backoff_seconds: float = float(os.getenv('CONVERTER_AI_RETRY_BACKOFF', '2'))
   incremental_cache_path: Path = Path(os.getenv('CONVERTER_INCREMENTAL_CACHE', './data/incremental.json')).resolve()
+  git_enabled: bool = os.getenv('CONVERTER_GIT_ENABLED', 'true').lower() == 'true'
+  git_tag_prefix: str = os.getenv('CONVERTER_GIT_TAG_PREFIX', 'conversion')
+  git_branch: Optional[str] = os.getenv('CONVERTER_GIT_BRANCH')
+  credentials_db_path: Path = Path(os.getenv('CONVERTER_CREDENTIAL_DB', './data/credentials.db')).resolve()
+  secrets_dir: Path = Path(os.getenv('CONVERTER_SECRETS_DIR', './data/secrets')).resolve()
+  secret_key_path: Path = Path(os.getenv('CONVERTER_SECRET_KEY_PATH', './data/secrets/fernet.key')).resolve()
+  backup_root: Path = Path(os.getenv('CONVERTER_BACKUP_ROOT', './data/cloud_backups')).resolve()
+  default_backup_provider: str = os.getenv('CONVERTER_BACKUP_PROVIDER', 'local')
+  backup_retention_count: int = int(os.getenv('CONVERTER_BACKUP_RETENTION', '10'))
+  backup_remote_template: str = os.getenv('CONVERTER_BACKUP_TEMPLATE', '{project}/{direction}')
 
   def ensure_directories(self) -> None:
     self.data_dir.mkdir(parents=True, exist_ok=True)
     self.chroma_path.mkdir(parents=True, exist_ok=True)
     if not self.db_path.parent.exists():
       self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    self.secrets_dir.mkdir(parents=True, exist_ok=True)
+    self.backup_root.mkdir(parents=True, exist_ok=True)
+    if not self.secret_key_path.parent.exists():
+      self.secret_key_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
