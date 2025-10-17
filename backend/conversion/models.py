@@ -176,10 +176,11 @@ class ManualFixEntry:
   file_path: str
   reason: str
   notes: List[str] = field(default_factory=list)
-  status: str = 'pending'  # pending, applied
+  status: str = 'pending'  # pending, applied, skipped
   override_path: Optional[str] = None
   submitted_by: Optional[str] = None
   timestamp: Optional[float] = None
+  fingerprint: Optional[str] = None
 
   def to_dict(self) -> Dict[str, Any]:
     return {
@@ -190,7 +191,8 @@ class ManualFixEntry:
       'status': self.status,
       'override_path': self.override_path,
       'submitted_by': self.submitted_by,
-      'timestamp': self.timestamp
+      'timestamp': self.timestamp,
+      'fingerprint': self.fingerprint
     }
 
 

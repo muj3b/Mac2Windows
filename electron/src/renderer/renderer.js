@@ -7,6 +7,7 @@ const state = {
   detection: null,
   sessionId: null,
   progressTimer: null,
+  logTimer: null,
   templates: [],
   webhooks: [],
   manualFixes: [],
@@ -14,6 +15,7 @@ const state = {
   previewEstimate: null,
   batchQueue: [],
   community: null,
+  backupProviders: [],
   costSettings: {
     enabled: true,
     max_budget_usd: 50,
@@ -43,10 +45,14 @@ const elements = {
   btnViewLogs: $('#btn-view-logs'),
   btnRefreshLogs: $('#btn-refresh-logs'),
   btnApplyFix: $('#btn-apply-fix'),
+  btnSkipFix: $('#btn-skip-fix'),
   btnSaveTemplate: $('#btn-save-template'),
   btnLoadTemplate: $('#btn-load-template'),
   btnShareTemplate: $('#btn-share-template'),
   btnAddWebhook: $('#btn-add-webhook'),
+  btnTestWebhooks: $('#btn-test-webhooks'),
+  btnImportTemplate: $('#btn-import-template'),
+  btnExportTemplate: $('#btn-export-template'),
   btnBatchAdd: $('#btn-batch-add'),
   btnBatchClear: $('#btn-batch-clear'),
   btnBatchStart: $('#btn-batch-start'),
@@ -72,6 +78,7 @@ const elements = {
   manualFixNote: $('#manual-fix-note'),
   manualFixCode: $('#manual-fix-code'),
   manualFixAuthor: $('#manual-fix-author'),
+  btnApplyLearned: $('#btn-apply-learned'),
   vulnerabilityList: $('#vulnerability-list'),
   vulnerabilityCount: $('#vulnerability-count'),
   costSummary: $('#cost-summary'),
@@ -143,8 +150,32 @@ const elements = {
   btnBackupSaveLocal: $('#btn-backup-save-local'),
   buildConsolePre: $('#build-console'),
   communityMetricsPanel: $('#community-metrics'),
-  progressSummary: $('#progress-summary')
+  progressSummary: $('#progress-summary'),
+  loadingOverlay: $('#loading-overlay'),
+  webhookFeedback: $('#webhook-feedback')
 };
+
+function setLoading(isLoading, message = 'Working…') {
+  if (!elements.loadingOverlay) return;
+  const label = elements.loadingOverlay.querySelector('.spinner-label');
+  if (label) label.textContent = message;
+  if (isLoading) {
+    elements.loadingOverlay.classList.remove('hidden');
+  } else {
+    elements.loadingOverlay.classList.add('hidden');
+  }
+}
+
+function clearTimers() {
+  if (state.progressTimer) {
+    clearInterval(state.progressTimer);
+    state.progressTimer = null;
+  }
+  if (state.logTimer) {
+    clearInterval(state.logTimer);
+    state.logTimer = null;
+  }
+}
 
 function initTabs() {
   elements.tabButtons.forEach((button) => {
@@ -393,6 +424,9 @@ function ensureWebhooksInitialized() {
   if (state.webhooks.length === 0) {
     state.webhooks.push({ url: '', headers: {}, events: ['conversion.completed'], secret: '' });
   }
+  if (elements.webhookFeedback) {
+    elements.webhookFeedback.textContent = '';
+  }
   renderWebhooks();
 }
 
@@ -470,14 +504,57 @@ function addWebhookRow() {
   renderWebhooks();
 }
 
-function renderManualFixes(summary) {
-  if (!summary) return;
-  const fixes = state.manualFixes;
+function showWebhookFeedback(message, tone = 'info') {
+  if (!elements.webhookFeedback) return;
+  elements.webhookFeedback.textContent = message;
+  elements.webhookFeedback.classList.remove('success', 'error');
+  if (tone === 'success') {
+    elements.webhookFeedback.classList.add('success');
+  } else if (tone === 'error') {
+    elements.webhookFeedback.classList.add('error');
+  }
+}
+
+async function testWebhooks() {
+  const webhooks = gatherWebhooks();
+  if (!webhooks.length) {
+    showWebhookFeedback('Add at least one webhook URL before testing.', 'error');
+    return;
+  }
+  try {
+    setLoading(true, 'Testing webhooks…');
+    const response = await window.macWinBridge.testWebhook({ webhooks });
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    const results = response.results || [];
+    const successCount = results.length;
+    if (successCount === webhooks.length) {
+      showWebhookFeedback(`Webhook test succeeded (${successCount}/${webhooks.length}).`, 'success');
+    } else {
+      showWebhookFeedback(`Webhook test partially succeeded (${successCount}/${webhooks.length}). Check logs for details.`, 'error');
+    }
+  } catch (error) {
+    console.error('Webhook test failed', error);
+    showWebhookFeedback(error.message || 'Webhook test failed', 'error');
+  } finally {
+    setLoading(false);
+  }
+}
+
+function renderManualFixes() {
+  const pendingFixes = (state.manualFixes || []).filter(
+    (entry) => entry.status !== 'applied' && entry.status !== 'skipped'
+  );
+  if (state.selectedManualFix && !pendingFixes.find((fix) => fix.chunk_id === state.selectedManualFix.chunk_id)) {
+    state.selectedManualFix = null;
+  }
   elements.manualFixList.innerHTML = '';
-  if (!fixes || fixes.length === 0) {
+  if (!pendingFixes.length) {
     elements.manualFixList.innerHTML = '<div class="placeholder">No manual fixes pending 🎉</div>';
+    elements.manualFixCount.textContent = '0 pending';
   } else {
-    fixes.forEach((fix) => {
+    pendingFixes.forEach((fix) => {
       const item = document.createElement('div');
       item.className = 'manual-fix-item';
       item.dataset.chunkId = fix.chunk_id;
@@ -490,8 +567,15 @@ function renderManualFixes(summary) {
       }
       elements.manualFixList.appendChild(item);
     });
+    elements.manualFixCount.textContent = `${pendingFixes.length} pending`;
   }
-  elements.manualFixCount.textContent = `${fixes.length} pending`;
+  elements.btnApplyFix.disabled = !state.selectedManualFix;
+  if (elements.btnSkipFix) {
+    elements.btnSkipFix.disabled = !state.selectedManualFix;
+  }
+  if (elements.btnApplyLearned) {
+    elements.btnApplyLearned.disabled = !state.sessionId || !pendingFixes.length;
+  }
 }
 
 function handleManualFixSelection(event) {
@@ -503,7 +587,6 @@ function handleManualFixSelection(event) {
   elements.manualFixCode.value = '';
   elements.manualFixNote.value = fix?.notes?.join('\n') || '';
   elements.manualFixAuthor.value = fix?.submitted_by || '';
-  elements.btnApplyFix.disabled = !fix;
   renderManualFixes();
 }
 
@@ -515,10 +598,15 @@ async function applyManualFix() {
     submitted_by: elements.manualFixAuthor.value || undefined
   };
   try {
+    setLoading(true, 'Applying manual fix…');
     await window.macWinBridge.submitManualFix(state.sessionId, state.selectedManualFix.chunk_id, payload);
     await refreshManualFixes();
+    elements.manualFixCode.value = '';
+    elements.manualFixNote.value = '';
   } catch (error) {
     console.error('Manual fix failed', error);
+  } finally {
+    setLoading(false);
   }
 }
 
@@ -529,9 +617,45 @@ async function refreshManualFixes() {
   renderManualFixes();
 }
 
-function renderVulnerabilities(summary) {
-  const issues = summary?.quality_report?.issues || [];
-  const alerts = issues.filter((issue) => issue.severity && issue.severity.toLowerCase() !== 'info');
+async function skipManualFix() {
+  if (!state.sessionId || !state.selectedManualFix) return;
+  try {
+    setLoading(true, 'Skipping manual fix…');
+    await window.macWinBridge.skipManualFix(state.sessionId, state.selectedManualFix.chunk_id, elements.manualFixNote.value || undefined);
+    state.selectedManualFix = null;
+    elements.manualFixCode.value = '';
+    elements.manualFixNote.value = '';
+    await refreshManualFixes();
+  } catch (error) {
+    console.error('Skip manual fix failed', error);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function applyLearnedPatterns() {
+  if (!state.sessionId) return;
+  try {
+    setLoading(true, 'Applying learned patterns…');
+    const response = await window.macWinBridge.applyLearnedPatterns(state.sessionId);
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    await refreshManualFixes();
+    if (response.summary) {
+      renderProgress(response.summary);
+    } else {
+      await refreshSummary();
+    }
+  } catch (error) {
+    console.error('Apply learned patterns failed', error);
+  } finally {
+    setLoading(false);
+  }
+}
+
+function renderVulnerabilities(issues) {
+  const alerts = (issues || []).filter((issue) => issue.severity && issue.severity.toLowerCase() !== 'info');
   elements.vulnerabilityCount.textContent = alerts.length ? `${alerts.length} alerts` : 'No alerts';
   if (alerts.length === 0) {
     elements.vulnerabilityList.innerHTML = '<div class="placeholder">All clear! 🎉</div>';
@@ -572,6 +696,22 @@ function renderCost(summary) {
   `;
 }
 
+async function refreshVulnerabilities(summary) {
+  if (!state.sessionId) {
+    renderVulnerabilities(summary?.quality_report?.issues || []);
+    return;
+  }
+  try {
+    const response = await window.macWinBridge.getVulnerabilities(state.sessionId);
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    renderVulnerabilities(response.issues || []);
+  } catch (error) {
+    renderVulnerabilities(summary?.quality_report?.issues || []);
+  }
+}
+
 function renderProgress(summary) {
   if (!summary) return;
   elements.qualityScorePill.textContent = summary.quality_score != null ? `Quality: ${(summary.quality_score * 100).toFixed(0)}%` : 'Quality: –';
@@ -581,7 +721,6 @@ function renderProgress(summary) {
     elements.progressLog.innerHTML = `<div><strong>${summary.current_chunk.file_path}</strong> • ${summary.current_chunk.summary || ''}</div>`;
   }
   renderStageProgress(summary);
-  renderVulnerabilities(summary);
   renderCost(summary);
   renderPreview(summary.preview_estimate);
   updateOfflineIndicator(summary.offline_mode);
@@ -731,20 +870,28 @@ function renderCommunityMetrics() {
 
 async function previewConversion() {
   if (!state.projectPath) return;
+  const payload = {
+    project_path: state.projectPath,
+    direction: state.direction,
+    exclusions: []
+  };
   try {
-    const payload = {
-      project_path: state.projectPath,
-      direction: state.direction,
-      exclusions: []
-    };
+    setLoading(true, 'Analyzing project…');
     const response = await window.macWinBridge.previewConversion(payload);
+    if (response.error) {
+      throw new Error(response.message);
+    }
     renderPreview(response.preview);
   } catch (error) {
     console.error('Preview failed', error);
+    elements.previewSummary.classList.remove('hidden');
+    elements.previewCards.innerHTML = `<div class="card">Preview failed: ${error?.message || 'Unknown error'}</div>`;
   }
+  setLoading(false);
 }
 
 function collectStartPayload() {
+  const { conversion, performance, ai } = collectTemplateSettings();
   return {
     project_path: state.projectPath,
     target_path: state.projectPath && state.direction === 'mac-to-win' ? `${state.projectPath}-windows` : `${state.projectPath}-mac`,
@@ -752,9 +899,9 @@ function collectStartPayload() {
     provider_id: elements.modelProvider.value || 'openai-compatible',
     model_identifier: elements.modelIdentifier.value || 'gpt-5',
     api_key: elements.apiKey.value || undefined,
-    conversion: gatherConversionSettings(),
-    performance: gatherPerformanceSettings(),
-    ai: gatherAISettings(),
+    conversion,
+    performance,
+    ai,
     cost: gatherCostSettings(),
     webhooks: gatherWebhooks(),
     incremental: false,
@@ -763,42 +910,70 @@ function collectStartPayload() {
   };
 }
 
+function collectTemplateSettings() {
+  return {
+    conversion: gatherConversionSettings(),
+    performance: gatherPerformanceSettings(),
+    ai: gatherAISettings()
+  };
+}
+
 async function startConversion() {
   if (!state.projectPath) return;
+  setLoading(true, 'Starting conversion…');
   const payload = collectStartPayload();
   payload.target_path = await promptForTargetPath(payload.target_path);
-  if (!payload.target_path) return;
-  const response = await window.macWinBridge.startConversion(payload);
-  if (response.error) {
-    console.error(response.message);
+  if (!payload.target_path) {
+    setLoading(false);
     return;
   }
-  state.sessionId = response.session_id;
-  state.manualFixes = [];
-  state.selectedManualFix = null;
-  elements.btnPause.disabled = false;
-  elements.btnResume.disabled = true;
-  elements.btnPreview.disabled = false;
-  elements.btnResumeFailed.disabled = false;
-  startProgressTimer();
+  try {
+    const response = await window.macWinBridge.startConversion(payload);
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    state.sessionId = response.session_id;
+    state.manualFixes = [];
+    state.selectedManualFix = null;
+    elements.manualFixCode.value = '';
+    elements.manualFixNote.value = '';
+    renderManualFixes();
+    elements.btnPause.disabled = false;
+    elements.btnResume.disabled = true;
+    elements.btnPreview.disabled = false;
+    elements.btnResumeFailed.disabled = false;
+    clearTimers();
+    startProgressTimer();
+  } catch (error) {
+    console.error('Unable to start conversion', error);
+  } finally {
+    setLoading(false);
+  }
 }
 
 async function resumeFailedConversion() {
   if (!state.sessionId) return;
+  setLoading(true, 'Resuming conversion…');
   const payload = {
     session_id: state.sessionId,
     provider_id: elements.modelProvider.value || undefined,
     model_identifier: elements.modelIdentifier.value || undefined,
     api_key: elements.apiKey.value || undefined
   };
-  const response = await window.macWinBridge.resumeFailedConversion(payload);
-  if (response.error) {
-    console.error(response.message);
-    return;
+  try {
+    const response = await window.macWinBridge.resumeFailedConversion(payload);
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    state.sessionId = response.session_id;
+    elements.btnResumeFailed.disabled = false;
+    clearTimers();
+    startProgressTimer();
+  } catch (error) {
+    console.error('Unable to resume conversion', error);
+  } finally {
+    setLoading(false);
   }
-  state.sessionId = response.session_id;
-  elements.btnResumeFailed.disabled = false;
-  startProgressTimer();
 }
 
 async function pauseConversion() {
@@ -816,9 +991,10 @@ async function resumeConversion() {
 }
 
 async function startProgressTimer() {
-  if (state.progressTimer) clearInterval(state.progressTimer);
+  clearTimers();
   await refreshSummary();
   state.progressTimer = setInterval(refreshSummary, 4000);
+  state.logTimer = setInterval(refreshLogs, 6000);
 }
 
 async function refreshSummary() {
@@ -831,7 +1007,9 @@ async function refreshSummary() {
   const summary = response.summary;
   if (!summary) return;
   renderProgress(summary);
+  await refreshVulnerabilities(summary);
   await refreshManualFixes();
+  await refreshLogs();
   if (!summary.paused) {
     elements.btnPause.disabled = false;
     elements.btnResume.disabled = true;
@@ -840,11 +1018,11 @@ async function refreshSummary() {
     elements.btnPause.disabled = true;
     elements.btnResume.disabled = false;
   }
-  if (summary.overall_percentage >= 1 && state.progressTimer) {
-    clearInterval(state.progressTimer);
-    state.progressTimer = null;
+  if (summary.overall_percentage >= 1) {
+    clearTimers();
     elements.btnPause.disabled = true;
     elements.btnResume.disabled = true;
+    setLoading(false);
   }
 }
 
@@ -853,10 +1031,15 @@ async function promptForTargetPath(defaultPath) {
 }
 
 async function refreshLogs() {
-  const response = await window.macWinBridge.fetchLogs(200);
+  const response = await window.macWinBridge.getBuildOutput(200);
   if (response.error) return;
   const entries = response.entries || [];
-  elements.buildConsole.textContent = entries.map((entry) => `${entry.timestamp || ''} ${entry.message}`).join('\n');
+  if (!entries.length) {
+    elements.buildConsole.textContent = 'No build output yet.';
+  } else {
+    elements.buildConsole.textContent = entries.map((entry) => `${entry.timestamp || ''} ${entry.message}`).join('\n');
+  }
+  elements.buildConsole.scrollTop = elements.buildConsole.scrollHeight;
 }
 
 async function loadTemplates() {
@@ -895,12 +1078,115 @@ async function loadModelProviders() {
   }
 }
 
+async function loadBackupProviders() {
+  try {
+    const response = await window.macWinBridge.listBackupProviders();
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    const providers = response.providers || [];
+    state.backupProviders = providers;
+    elements.backupProvider.innerHTML = '';
+    const previousSelection = elements.backupProvider.value;
+    providers.forEach((provider) => {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = provider.name || provider.id;
+      elements.backupProvider.appendChild(option);
+    });
+    if (providers.length) {
+      const defaultProviderId = providers.find((provider) => provider.id === previousSelection)?.id || providers[0].id;
+      elements.backupProvider.value = defaultProviderId;
+      populateBackupCredentials(defaultProviderId);
+    } else {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No providers configured';
+      elements.backupProvider.appendChild(option);
+      populateBackupCredentials('');
+    }
+  } catch (error) {
+    console.error('Failed to load backup providers', error);
+  }
+}
+
+function populateBackupCredentials(providerId) {
+  const provider = state.backupProviders.find((item) => item.id === providerId);
+  elements.backupCredential.innerHTML = '';
+  if (provider && Array.isArray(provider.credentials) && provider.credentials.length) {
+    provider.credentials.forEach((credential) => {
+      const option = document.createElement('option');
+      option.value = credential.id;
+      option.textContent = credential.label || credential.id;
+      elements.backupCredential.appendChild(option);
+    });
+  } else {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No credentials linked';
+    elements.backupCredential.appendChild(option);
+  }
+  updateBackupForm(provider);
+}
+
+function updateBackupForm(provider) {
+  const requiresOAuth = provider?.requires_oauth;
+  const isLocal = provider?.id === 'local';
+  ['backup-client-field', 'backup-secret-field', 'backup-scopes-field', 'backup-root-field', 'backup-tenant-field'].forEach((clazz) => {
+    $$('.' + clazz).forEach((node) => {
+      node.style.display = requiresOAuth ? 'flex' : 'none';
+    });
+  });
+  $$('.backup-local-field').forEach((node) => {
+    node.style.display = isLocal ? 'flex' : 'none';
+  });
+}
+
+async function connectBackupProvider() {
+  const providerId = elements.backupProvider.value;
+  const provider = state.backupProviders.find((item) => item.id === providerId);
+  if (!provider) return;
+  try {
+    if (provider.requires_oauth) {
+      const config = {
+        client_id: elements.backupClientId.value,
+        client_secret: elements.backupClientSecret.value,
+        label: elements.backupCredentialLabel.value || `${providerId}-oauth`,
+        scopes: elements.backupScopes.value ? elements.backupScopes.value.split(',').map((scope) => scope.trim()).filter(Boolean) : provider.scopes,
+        root_folder: elements.backupRootFolder.value || undefined,
+        tenant: elements.backupTenant.value || undefined
+      };
+      const result = await window.macWinBridge.startBackupOAuth(providerId, config);
+      if (result?.auth_url) {
+        window.macWinBridge.openExternal(result.auth_url);
+      }
+    } else {
+      const body = {
+        label: elements.backupCredentialLabel.value || `${providerId}-credential`,
+        data: {}
+      };
+      if (providerId === 'local') {
+        body.data.base_path = elements.backupLocalPath.value || undefined;
+      }
+      await window.macWinBridge.createBackupCredential(providerId, body);
+    }
+    await loadBackupProviders();
+  } catch (error) {
+    console.error('Failed to connect backup provider', error);
+  }
+}
+
 async function saveTemplate() {
-  const payload = collectStartPayload();
-  payload.name = elements.templateName.value || 'default-template';
-  payload.description = elements.templateDescription.value || '';
-  payload.owner = elements.templateOwner.value || 'local';
-  payload.tags = elements.templateTags.value ? elements.templateTags.value.split(',').map((tag) => tag.trim()).filter(Boolean) : [];
+  const { conversion, performance, ai } = collectTemplateSettings();
+  const payload = {
+    name: elements.templateName.value || 'default-template',
+    description: elements.templateDescription.value || '',
+    owner: elements.templateOwner.value || 'local',
+    tags: elements.templateTags.value ? elements.templateTags.value.split(',').map((tag) => tag.trim()).filter(Boolean) : [],
+    conversion,
+    performance,
+    ai
+  };
   const response = await window.macWinBridge.saveTemplate(payload);
   if (response.error) {
     console.error(response.message);
@@ -913,17 +1199,7 @@ async function loadTemplateByName(name) {
   const response = await window.macWinBridge.loadTemplate(name);
   if (response.error || !response.template) return;
   const tpl = response.template;
-  elements.codeStyle.value = tpl.conversion.code_style;
-  elements.commentStyle.value = tpl.conversion.comments;
-  elements.namingStyle.value = tpl.conversion.naming;
-  elements.errorStyle.value = tpl.conversion.error_handling;
-  elements.maxCpu.value = tpl.performance.max_cpu;
-  elements.maxRam.value = tpl.performance.max_ram_gb;
-  elements.threads.value = tpl.performance.threads;
-  elements.apiRate.value = tpl.performance.api_rate_limit;
-  elements.aiTemp.value = tpl.ai.temperature;
-  elements.aiStrategy.value = tpl.ai.strategy;
-  elements.aiRetries.value = tpl.ai.retries;
+  applyTemplateSettings(tpl);
 }
 
 async function shareTemplate() {
@@ -950,6 +1226,72 @@ async function deleteTemplate(name) {
     return;
   }
   await loadTemplates();
+}
+
+async function importTemplate() {
+  const response = await window.macWinBridge.importTemplate();
+  if (response.cancelled) {
+    return;
+  }
+  if (response.error) {
+    console.error(response.message);
+    return;
+  }
+  if (response.template) {
+    applyTemplateSettings(response.template);
+    if (response.template.name) {
+      elements.templateName.value = response.template.name;
+    }
+  }
+  await loadTemplates();
+}
+
+async function exportTemplate() {
+  const { conversion, performance, ai } = collectTemplateSettings();
+  await window.macWinBridge.exportTemplate(elements.templateName.value || 'template', {
+    conversion,
+    performance,
+    ai,
+    metadata: {
+      description: elements.templateDescription.value || '',
+      owner: elements.templateOwner.value || 'local',
+      tags: elements.templateTags.value ? elements.templateTags.value.split(',').map((tag) => tag.trim()).filter(Boolean) : []
+    }
+  });
+}
+
+function applyTemplateSettings(template) {
+  if (template.conversion) {
+    elements.codeStyle.value = template.conversion.code_style || elements.codeStyle.value;
+    elements.commentStyle.value = template.conversion.comments || elements.commentStyle.value;
+    elements.namingStyle.value = template.conversion.naming || elements.namingStyle.value;
+    elements.errorStyle.value = template.conversion.error_handling || elements.errorStyle.value;
+    elements.cleanupUnused.checked = template.conversion.cleanup_unused_assets ?? elements.cleanupUnused.checked;
+    elements.cleanupAutodelete.checked = template.conversion.cleanup_auto_delete ?? elements.cleanupAutodelete.checked;
+    elements.cleanupMinBytes.value = Math.round((template.conversion.cleanup_min_bytes || 1024 * 1024) / 1024);
+    elements.qualityThreshold.value = template.conversion.quality_score_threshold ?? elements.qualityThreshold.value;
+    elements.enableLearning.checked = template.conversion.enable_learning ?? elements.enableLearning.checked;
+    elements.learningTrigger.value = template.conversion.learning_trigger_count ?? elements.learningTrigger.value;
+  }
+  if (template.performance) {
+    elements.maxCpu.value = template.performance.max_cpu ?? elements.maxCpu.value;
+    elements.maxRam.value = template.performance.max_ram_gb ?? elements.maxRam.value;
+    elements.threads.value = template.performance.threads ?? elements.threads.value;
+    elements.apiRate.value = template.performance.api_rate_limit ?? elements.apiRate.value;
+    elements.parallelConversions.value = template.performance.parallel_conversions ?? elements.parallelConversions.value;
+    elements.buildTimeout.value = template.performance.build_timeout_seconds ?? elements.buildTimeout.value;
+    elements.preferOffline.checked = template.performance.prefer_offline ?? elements.preferOffline.checked;
+  }
+  if (template.ai) {
+    elements.aiTemp.value = template.ai.temperature ?? elements.aiTemp.value;
+    elements.aiStrategy.value = template.ai.strategy ?? elements.aiStrategy.value;
+    elements.aiRetries.value = template.ai.retries ?? elements.aiRetries.value;
+    elements.aiOffline.checked = template.ai.offline_only ?? elements.aiOffline.checked;
+    elements.aiPromptTone.value = template.ai.prompt_tone || elements.aiPromptTone.value;
+    elements.aiFallbackModel.value = template.ai.fallback_model_identifier || '';
+    elements.aiFallbackProvider.value = template.ai.fallback_provider_id || '';
+    elements.aiSmartPrompts.checked = template.ai.smart_prompting ?? elements.aiSmartPrompts.checked;
+  }
 }
 
 async function loadCommunityMetrics() {
@@ -995,7 +1337,11 @@ function clearBatchQueue() {
 }
 
 async function startBatchConversion() {
-  if (!state.batchQueue.length) return;
+  if (!state.batchQueue.length) {
+    elements.batchStatus.textContent = 'Queue is empty';
+    return;
+  }
+  setLoading(true, 'Scheduling batch conversion…');
   const payload = collectStartPayload();
   const batchPayload = {
     projects: state.batchQueue,
@@ -1009,13 +1355,18 @@ async function startBatchConversion() {
     incremental: payload.incremental,
     backup: payload.backup
   };
-  const response = await window.macWinBridge.startBatchConversion(batchPayload);
-  if (response.error) {
-    console.error(response.message);
-    return;
+  try {
+    const response = await window.macWinBridge.startBatchConversion(batchPayload);
+    if (response.error) {
+      throw new Error(response.message);
+    }
+    elements.batchStatus.textContent = `Scheduled sessions: ${response.scheduled_sessions.length}`;
+    clearBatchQueue();
+  } catch (error) {
+    console.error('Batch conversion failed', error);
+  } finally {
+    setLoading(false);
   }
-  elements.batchStatus.textContent = `Scheduled sessions: ${response.scheduled_sessions.length}`;
-  clearBatchQueue();
 }
 
 function attachEventListeners() {
@@ -1028,12 +1379,24 @@ function attachEventListeners() {
   elements.btnViewLogs.addEventListener('click', refreshLogs);
   elements.btnRefreshLogs.addEventListener('click', refreshLogs);
   elements.btnApplyFix.addEventListener('click', applyManualFix);
+  if (elements.btnSkipFix) {
+    elements.btnSkipFix.addEventListener('click', skipManualFix);
+  }
+  if (elements.btnApplyLearned) {
+    elements.btnApplyLearned.addEventListener('click', applyLearnedPatterns);
+  }
   elements.manualFixList.addEventListener('click', handleManualFixSelection);
   elements.btnSaveTemplate.addEventListener('click', saveTemplate);
   elements.btnLoadTemplate.addEventListener('click', () => {
     const name = elements.templateName.value;
     if (name) loadTemplateByName(name);
   });
+  if (elements.btnImportTemplate) {
+    elements.btnImportTemplate.addEventListener('click', importTemplate);
+  }
+  if (elements.btnExportTemplate) {
+    elements.btnExportTemplate.addEventListener('click', exportTemplate);
+  }
   elements.templateList.addEventListener('click', (event) => {
     const loadButton = event.target.closest('button[data-template-load]');
     const deleteButton = event.target.closest('button[data-template-delete]');
@@ -1042,6 +1405,30 @@ function attachEventListeners() {
   });
   elements.btnShareTemplate.addEventListener('click', shareTemplate);
   elements.btnAddWebhook.addEventListener('click', addWebhookRow);
+  if (elements.btnTestWebhooks) {
+    elements.btnTestWebhooks.addEventListener('click', testWebhooks);
+  }
+  if (elements.backupProvider) {
+    elements.backupProvider.addEventListener('change', (event) => populateBackupCredentials(event.target.value));
+  }
+  if (elements.btnBackupConnect) {
+    elements.btnBackupConnect.addEventListener('click', connectBackupProvider);
+  }
+  if (elements.btnBackupRefresh) {
+    elements.btnBackupRefresh.addEventListener('click', loadBackupProviders);
+  }
+  if (elements.btnBackupSaveLocal) {
+    elements.btnBackupSaveLocal.addEventListener('click', () => {
+      if (elements.backupLocalPath.value) {
+        window.macWinBridge.openPath(elements.backupLocalPath.value);
+      }
+    });
+  }
+  if (elements.debugToggle) {
+    elements.debugToggle.addEventListener('change', (event) => {
+      window.macWinBridge.setDebugMode(event.target.checked);
+    });
+  }
   elements.btnBatchAdd.addEventListener('click', addBatchItem);
   elements.batchQueue.addEventListener('click', (event) => {
     const removeButton = event.target.closest('button[data-batch-remove]');
@@ -1061,6 +1448,8 @@ async function loadInitialData() {
   await updateResourceSnapshot();
   await loadModelProviders();
   await loadTemplates();
+  await loadBackupProviders();
+  await loadCommunityMetrics();
   ensureWebhooksInitialized();
 }
 
@@ -1083,3 +1472,4 @@ function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+window.addEventListener('beforeunload', clearTimers);

@@ -123,7 +123,10 @@
             <section class="panel">
               <div class="panel-header">
                 <h2>Manual Fix Queue</h2>
-                <span id="manual-fix-count" class="summary-pill summary-pill--muted">0 pending</span>
+                <div class="manual-actions">
+                  <span id="manual-fix-count" class="summary-pill summary-pill--muted">0 pending</span>
+                  <button id="btn-apply-learned" class="secondary-button" disabled>Apply Learned Patterns</button>
+                </div>
               </div>
               <div class="manual-fix-layout">
                 <div id="manual-fix-list" class="manual-fix-list">
@@ -138,10 +141,11 @@
                     <label for="manual-fix-code">Override Code</label>
                     <textarea id="manual-fix-code" rows="12" spellcheck="false"></textarea>
                   </div>
-                  <div class="fix-actions">
-                    <input id="manual-fix-author" type="text" placeholder="Your name (optional)" />
-                    <button id="btn-apply-fix" class="primary-button" disabled>Apply Manual Fix</button>
-                  </div>
+                <div class="fix-actions">
+                  <input id="manual-fix-author" type="text" placeholder="Your name (optional)" />
+                  <button id="btn-apply-fix" class="primary-button" disabled>Apply Manual Fix</button>
+                  <button id="btn-skip-fix" class="secondary-button secondary-button--danger" disabled>Skip</button>
+                </div>
                 </div>
               </div>
             </section>
@@ -345,7 +349,11 @@
               <h2>Webhooks</h2>
               <p class="hint-text">Notify your CI/CD pipelines or chat tools when conversions start, complete, or fail.</p>
               <div id="webhook-rows" class="webhook-rows"></div>
-              <button id="btn-add-webhook" class="secondary-button secondary-button--icon">Add Webhook</button>
+              <div class="webhook-actions">
+                <button id="btn-add-webhook" class="secondary-button secondary-button--icon">Add Webhook</button>
+                <button id="btn-test-webhooks" class="secondary-button">Send Test Event</button>
+              </div>
+              <div id="webhook-feedback" class="webhook-feedback muted" role="status"></div>
             </section>
 
             <section class="panel">
@@ -354,6 +362,8 @@
                 <input id="template-name" type="text" placeholder="Template name" />
                 <button id="btn-save-template" class="secondary-button">Save Template</button>
                 <button id="btn-load-template" class="secondary-button">Load</button>
+                <button id="btn-import-template" class="secondary-button">Import</button>
+                <button id="btn-export-template" class="secondary-button">Export</button>
               </div>
               <div class="settings-grid">
                 <div class="form-group">
@@ -497,5 +507,9 @@
       </main>
     </div>
     <script src="renderer.js" type="module"></script>
+    <div id="loading-overlay" class="loading-overlay hidden" role="status" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="spinner-label">Working…</div>
+    </div>
   </body>
 </html>

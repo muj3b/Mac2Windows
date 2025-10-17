@@ -156,6 +156,19 @@ class ConversionManager:
     self.project_type_detector = ProjectTypeDetector()
     self.batch_queue = BatchQueue()
 
+  def _learning_active(self, session: Optional[ConversionSession]) -> bool:
+    if not self.learning_memory or not session:
+      return False
+    return bool(getattr(session.conversion_settings, 'enable_learning', True))
+
+  def _learning_threshold(self, session: ConversionSession) -> int:
+    if not self.learning_memory:
+      return 0
+    trigger = getattr(session.conversion_settings, 'learning_trigger_count', None)
+    if isinstance(trigger, int) and trigger > 0:
+      return max(1, trigger)
+    return self.learning_memory.THRESHOLD
+
   def active_sessions(self) -> List[str]:
     return list(self.sessions.keys())
 
@@ -185,7 +198,9 @@ class ConversionManager:
       summary = session.progress.summary()
       summary.quality_report = session.quality_report
       summary.conversion_report = session.conversion_report
-      summary.manual_fixes_pending = sum(1 for entry in session.manual_queue.values() if entry.status != 'applied')
+      summary.manual_fixes_pending = sum(
+        1 for entry in session.manual_queue.values() if entry.status not in {'applied', 'skipped'}
+      )
       summary.backups = self._summarize_backups(session_id)
       summary.test_results = session.test_results
       summary.benchmarks = session.benchmarks
@@ -219,7 +234,9 @@ class ConversionManager:
     summary = tracker.summary()
     summary.quality_report = state.quality_report
     summary.conversion_report = state.conversion_report
-    summary.manual_fixes_pending = sum(1 for entry in state.manual_queue.values() if entry.status != 'applied')
+    summary.manual_fixes_pending = sum(
+      1 for entry in state.manual_queue.values() if entry.status not in {'applied', 'skipped'}
+    )
     summary.backups = self._summarize_backups(session_id)
     summary.test_results = state.test_results
     summary.benchmarks = state.benchmarks
@@ -355,6 +372,29 @@ class ConversionManager:
       return [entry.to_dict() for entry in state.manual_queue.values()]
     return []
 
+  def _parse_webhooks(self, webhooks: Optional[List[object]]) -> List[WebhookConfig]:
+    parsed: List[WebhookConfig] = []
+    for entry in webhooks or []:
+      if isinstance(entry, WebhookConfig):
+        parsed.append(entry)
+        continue
+      if isinstance(entry, dict):
+        url = entry.get('url')
+        if not url:
+          continue
+        parsed.append(
+          WebhookConfig(
+            url=url,
+            headers=entry.get('headers', {}),
+            events=entry.get('events') or [],
+            secret_token=entry.get('secret_token')
+          )
+        )
+        continue
+      if isinstance(entry, str) and entry.strip():
+        parsed.append(WebhookConfig(url=entry.strip()))
+    return parsed
+
   def submit_manual_fix(self, session_id: str, chunk_id: str, code: str, submitted_by: Optional[str] = None, note: Optional[str] = None) -> bool:
     session = self.sessions.get(session_id)
     if not session:
@@ -362,6 +402,7 @@ class ConversionManager:
     record = session.chunks.get(chunk_id)
     if not record:
       raise ValueError('Chunk not found')
+    previous_output = record.raw_output
     entry = session.manual_queue.get(chunk_id)
     if not entry:
       entry = ManualFixEntry(chunk_id=chunk_id, file_path=str(record.chunk.file_path), reason='Manual override')
@@ -389,6 +430,24 @@ class ConversionManager:
     self.incremental_cache.update_checksum(record.chunk.file_path, calculate_checksum(record.chunk.file_path))
     session.summary_notes.append(f'Manual fix applied for {record.chunk.file_path}')
     session.progress.update_chunk(record)
+    if self._learning_active(session) and previous_output:
+      threshold = self._learning_threshold(session)
+      pattern = self.learning_memory.record_manual_fix(previous_output, code, {
+        'session_id': session_id,
+        'chunk_id': chunk_id,
+        'file_path': str(record.chunk.file_path),
+        'note': note,
+        'threshold': threshold
+      })
+      if pattern:
+        entry.fingerprint = pattern.get('fingerprint')
+        pattern_threshold = max(pattern.get('threshold', threshold), threshold)
+        if pattern.get('count', 0) >= pattern_threshold:
+          applied_chunks = self._apply_pattern_to_pending_chunks(session, pattern['fingerprint'], source='threshold')
+          if applied_chunks:
+            session.summary_notes.append(
+              f'Learned pattern auto-applied to {len(applied_chunks)} pending fix(es).'
+            )
     if session.quality_report and chunk_id in session.quality_report.flagged_chunks:
       session.quality_report.flagged_chunks.remove(chunk_id)
     self.session_store.upsert(session)
@@ -404,6 +463,134 @@ class ConversionManager:
         'submitted_by': submitted_by
       })
     return True
+
+  def skip_manual_fix(self, session_id: str, chunk_id: str, reason: Optional[str] = None) -> bool:
+    session = self.sessions.get(session_id)
+    if not session:
+      raise ValueError('Session is not active; manual fixes require an active session.')
+    record = session.chunks.get(chunk_id)
+    if not record:
+      raise ValueError('Chunk not found')
+    entry = session.manual_queue.get(chunk_id)
+    if not entry:
+      entry = ManualFixEntry(chunk_id=chunk_id, file_path=str(record.chunk.file_path), reason='Manual override')
+      session.manual_queue[chunk_id] = entry
+    entry.status = 'skipped'
+    if reason:
+      entry.notes.append(reason)
+    if self._learning_active(session) and record.raw_output:
+      entry.fingerprint = self.learning_memory.fingerprint(record.raw_output)
+    record.status = ChunkStatus.SKIPPED
+    record.summary = 'Manual fix skipped by user'
+    session.summary_notes.append(f'Manual fix skipped for {record.chunk.file_path}')
+    session.progress.update_chunk(record)
+    self.session_store.upsert(session)
+    if self.event_logger:
+      self.event_logger.log_event('manual_fix_skipped', 'Manual fix skipped', {
+        'session_id': session_id,
+        'chunk_id': chunk_id
+      })
+    return True
+
+  def apply_learned_patterns(self, session_id: str) -> List[Dict[str, Any]]:
+    session = self.sessions.get(session_id)
+    if not session:
+      raise ValueError('Session must be active to apply learned patterns.')
+    if not self._learning_active(session):
+      return []
+    applied: List[Dict[str, Any]] = []
+    threshold = self._learning_threshold(session)
+    for chunk_id, entry in list(session.manual_queue.items()):
+      if entry.status == 'applied' or entry.status == 'skipped':
+        continue
+      record = session.chunks.get(chunk_id)
+      if not record or not record.raw_output:
+        continue
+      fingerprint = self.learning_memory.fingerprint(record.raw_output)
+      pattern = self.learning_memory.get_pattern_by_fingerprint(fingerprint)
+      if not pattern:
+        continue
+      pattern_threshold = max(pattern.get('threshold', threshold), threshold)
+      if pattern.get('count', 0) < pattern_threshold:
+        continue
+      replacement = pattern.get('replacement')
+      if not replacement or not replacement.strip() or replacement == record.raw_output:
+        continue
+      metadata = {
+        'session_id': session.session_id,
+        'chunk_id': chunk_id,
+        'file_path': entry.file_path,
+        'source': 'apply_all'
+      }
+      self.learning_memory.register_auto_attempt(fingerprint, metadata)
+      self._apply_learned_replacement(session, record, replacement, pattern.get('hint'), 'apply_all', fingerprint)
+      self.learning_memory.mark_auto_success(fingerprint, True)
+      applied.append({'chunk_id': chunk_id, 'pattern': fingerprint})
+    if applied:
+      self.session_store.upsert(session)
+    return applied
+
+  def _apply_pattern_to_pending_chunks(self, session: ConversionSession, fingerprint: str, source: str) -> List[str]:
+    if not self._learning_active(session):
+      return []
+    pattern = self.learning_memory.get_pattern_by_fingerprint(fingerprint)
+    if not pattern:
+      return []
+    replacement = pattern.get('replacement')
+    if not replacement:
+      return []
+    applied_chunks: List[str] = []
+    for chunk_id, entry in list(session.manual_queue.items()):
+      if entry.status == 'applied' or entry.status == 'skipped':
+        continue
+      record = session.chunks.get(chunk_id)
+      if not record or not record.raw_output:
+        continue
+      current_fp = self.learning_memory.fingerprint(record.raw_output)
+      if current_fp != fingerprint:
+        continue
+      metadata = {
+        'session_id': session.session_id,
+        'chunk_id': chunk_id,
+        'file_path': entry.file_path,
+        'source': source
+      }
+      self.learning_memory.register_auto_attempt(fingerprint, metadata)
+      self._apply_learned_replacement(session, record, replacement, pattern.get('hint'), source, fingerprint)
+      self.learning_memory.mark_auto_success(fingerprint, True)
+      applied_chunks.append(chunk_id)
+    if applied_chunks:
+      self.session_store.upsert(session)
+    return applied_chunks
+
+  def _apply_learned_replacement(
+    self,
+    session: ConversionSession,
+    record: ChunkRecord,
+    replacement: str,
+    hint: Optional[str],
+    source: str,
+    fingerprint: Optional[str] = None
+  ) -> None:
+    output_path = self._determine_output_path(session, record.chunk)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(replacement, encoding='utf-8')
+    record.raw_output = replacement
+    record.output_path = output_path
+    record.status = ChunkStatus.COMPLETED
+    record.summary = hint or 'Auto-applied learned pattern'
+    record.last_error = None
+    session.progress.update_chunk(record)
+    entry = session.manual_queue.get(record.chunk.chunk_id)
+    if entry:
+      entry.status = 'applied'
+      entry.notes.append(hint or 'Applied learned pattern automatically.')
+      entry.override_path = str(output_path)
+      if fingerprint:
+        entry.fingerprint = fingerprint
+    session.summary_notes.append(
+      f"Applied learned pattern ({source}) for {record.chunk.file_path}"
+    )
 
   def start_session(
     self,
@@ -436,26 +623,7 @@ class ConversionManager:
       else None
     )
 
-    hook_objects: List[WebhookConfig] = []
-    for entry in webhooks or []:
-      if isinstance(entry, WebhookConfig):
-        hook_objects.append(entry)
-        continue
-      if isinstance(entry, dict):
-        url = entry.get('url')
-        if not url:
-          continue
-        hook_objects.append(
-          WebhookConfig(
-            url=url,
-            headers=entry.get('headers', {}),
-            events=entry.get('events') or [],
-            secret_token=entry.get('secret_token')
-          )
-        )
-        continue
-      if isinstance(entry, str):
-        hook_objects.append(WebhookConfig(url=entry.strip()))
+    hook_objects = self._parse_webhooks(webhooks)
 
     work_plan = generate_work_plan(project_path, direction)
     if conversion_settings.exclusions:
@@ -695,10 +863,16 @@ class ConversionManager:
 
     context = self.rag_builder.query_context(chunk)
     previous_summary = session.last_chunk_summary.get(chunk.file_path.as_posix())
-    learning_hints = []
-    if self.learning_memory:
-      hints = self.learning_memory.suggestions(chunk.content)
-      learning_hints = hints.get('matches', [])
+    learning_hints: List[str] = []
+    if self._learning_active(session):
+      candidate = self.learning_memory.get_pattern(chunk.content)
+      session_threshold = self._learning_threshold(session)
+      if candidate and candidate.get('count', 0) >= session_threshold:
+        hint = candidate.get('hint') or 'Apply previously learned correction pattern.'
+        attempts = candidate.get('auto_attempts', 0)
+        successes = candidate.get('auto_successes', 0)
+        rate = f"success rate {successes}/{attempts}" if attempts else 'not auto-applied yet'
+        learning_hints = [f"Learned pattern ({candidate.get('count', 0)} fixes, {rate}): {hint}"]
     async def _invoke(config: OrchestrationConfig) -> Dict[str, Any]:
       return await self.orchestrator.convert_chunk(
         chunk=chunk,
@@ -734,6 +908,23 @@ class ConversionManager:
     tokens_used = result.get('tokens_used', 0)
     cost_usd = result.get('cost_usd', 0.0)
     stopped_early = result.get('stopped_early', False)
+    auto_pattern_info = None
+    if self._learning_active(session):
+      pattern = self.learning_memory.get_pattern(output_text)
+      session_threshold = self._learning_threshold(session)
+      if pattern and pattern.get('count', 0) < session_threshold:
+        pattern = None
+      if pattern:
+        self.learning_memory.register_auto_attempt(pattern['fingerprint'], {
+          'session_id': session.session_id,
+          'chunk_id': chunk.chunk_id,
+          'file_path': str(chunk.file_path),
+          'source': 'conversion'
+        })
+        replacement = pattern.get('replacement')
+        if replacement and replacement.strip():
+          output_text = replacement
+          auto_pattern_info = pattern
 
     output_path = self._determine_output_path(session, chunk)
 
@@ -750,6 +941,15 @@ class ConversionManager:
     record.partial_completion = stopped_early
     if stopped_early:
       record.last_error = result.get('last_error', 'Model halted early; instructing resume.')
+
+    if auto_pattern_info:
+      record.summary = f"{summary} (learned pattern)"
+      session.summary_notes.append(f"Applied learned pattern to {chunk.file_path}")
+      if record.chunk.chunk_id in session.manual_queue:
+        entry = session.manual_queue[record.chunk.chunk_id]
+        entry.notes.append('Applied learned pattern automatically during conversion.')
+        entry.status = 'applied'
+        entry.fingerprint = auto_pattern_info.get('fingerprint')
 
     session.progress.update_chunk(record)
 
@@ -781,6 +981,9 @@ class ConversionManager:
     session.last_chunk_summary[chunk.file_path.as_posix()] = summary
     self.rag_builder.register_chunk(chunk, summary, output_text)
     session.symbol_table.update(self._extract_symbols(chunk))
+
+    if auto_pattern_info and self._learning_active(session):
+      self.learning_memory.mark_auto_success(auto_pattern_info['fingerprint'], True)
 
     if chunk.stage == Stage.CODE:
       self._assemble_file_if_ready(session, chunk.chunk.file_path)
@@ -830,7 +1033,7 @@ class ConversionManager:
     session.progress.start_stage(stage)
     report = await self.quality_engine.evaluate(session)
     session.quality_report = report
-    if self.learning_memory and report.issues:
+    if self._learning_active(session) and report.issues:
       for issue in report.issues:
         self.learning_memory.record(issue.category, issue.message)
     stage_progress = session.progress.stage_progress[stage]
@@ -1174,6 +1377,8 @@ class ConversionManager:
         entry.notes.append(note)
     if note is None and reason not in entry.notes:
       entry.notes.append(reason)
+    if self._learning_active(session) and record.raw_output:
+      entry.fingerprint = self.learning_memory.fingerprint(record.raw_output)
     if session.quality_report is None:
       session.quality_report = QualityReport()
     if record.chunk.chunk_id not in session.quality_report.flagged_chunks:
@@ -1379,6 +1584,16 @@ class ConversionManager:
       return
     payload = self._build_webhook_payload(session, status='quality')
     await self.webhook_manager.dispatch(session.webhooks, 'conversion.quality_ready', payload)
+
+  async def test_webhooks(self, configs: List[WebhookConfig]) -> List[Dict[str, Any]]:
+    hooks = self._parse_webhooks(configs)
+    if not hooks:
+      return []
+    sample_payload = {
+      'message': 'Webhook connectivity test',
+      'timestamp': time.time()
+    }
+    return await self.webhook_manager.dispatch(hooks, 'conversion.test', sample_payload)
 
   def _build_webhook_payload(self, session: ConversionSession, status: str, error: Optional[str] = None) -> Dict[str, Any]:
     summary = session.progress.summary()

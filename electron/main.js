@@ -1,7 +1,9 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const axios = require('axios');
+const fs = require('fs');
+const fsp = fs.promises;
 
 const BACKEND_PORT = process.env.BACKEND_PORT || 6110;
 const BACKEND_HOST = process.env.BACKEND_HOST || '127.0.0.1';
@@ -211,6 +213,19 @@ const setupIpcHandlers = () => {
     }
   });
 
+  ipcMain.handle('backend:skipManualFix', async (_event, payload) => {
+    try {
+      const { session_id: sessionId, chunk_id: chunkId, note } = payload;
+      const response = await axios.post(`${BACKEND_URL}/conversion/manual/${sessionId}/${chunkId}/skip`, { note });
+      return response.data;
+    } catch (error) {
+      return {
+        error: true,
+        message: error.response?.data?.detail || error.message || 'Unable to skip manual fix'
+      };
+    }
+  });
+
   ipcMain.handle('backend:listTemplates', async () => {
     try {
       const response = await axios.get(`${BACKEND_URL}/settings/templates`);
@@ -327,6 +342,83 @@ const setupIpcHandlers = () => {
       return response.data;
     } catch (error) {
       return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:getCostEstimate', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/preview`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:getVulnerabilities', async (_event, sessionId) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/conversion/vulnerabilities/${sessionId}`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:getBuildOutput', async (_event, limit = 200) => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/conversion/build_output`, { params: { limit } });
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:webhookTest', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/webhook/test`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:applyLearnedPatterns', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/learning/apply_all`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:exportTemplate', async (_event, payload) => {
+    const { name, template } = payload;
+    const defaultPath = `${name || 'template'}.json`;
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      title: 'Export Template',
+      defaultPath
+    });
+    if (canceled || !filePath) {
+      return { cancelled: true };
+    }
+    await fsp.writeFile(filePath, JSON.stringify(template, null, 2), 'utf-8');
+    return { path: filePath };
+  });
+
+  ipcMain.handle('backend:importTemplate', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Import Template',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      properties: ['openFile']
+    });
+    if (canceled || !filePaths?.length) {
+      return { cancelled: true };
+    }
+    try {
+      const raw = await fsp.readFile(filePaths[0], 'utf-8');
+      const data = JSON.parse(raw);
+      return { template: data, path: filePaths[0] };
+    } catch (error) {
+      return { error: true, message: error.message };
     }
   });
 

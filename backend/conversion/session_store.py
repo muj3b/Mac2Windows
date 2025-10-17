@@ -287,7 +287,8 @@ class ConversionSessionStore:
           status=value.get('status', 'pending'),
           override_path=value.get('override_path'),
           submitted_by=value.get('submitted_by'),
-          timestamp=value.get('timestamp')
+          timestamp=value.get('timestamp'),
+          fingerprint=value.get('fingerprint')
         )
         for key, value in manual_queue_payload.items()
       }

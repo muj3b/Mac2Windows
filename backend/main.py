@@ -244,6 +244,18 @@ class IssueReportPayload(BaseModel):
   email: Optional[str] = None
 
 
+class WebhookTestPayload(BaseModel):
+  webhooks: List[WebhookConfigPayload]
+
+
+class ManualFixSkipPayload(BaseModel):
+  note: Optional[str] = None
+
+
+class ApplyPatternsPayload(BaseModel):
+  session_id: str
+
+
 class ConversionStartPayload(BaseModel):
   project_path: str = Field(..., description='Source project root directory.')
   target_path: str = Field(..., description='Output directory for converted project.')
@@ -430,6 +442,16 @@ async def conversion_status(session_id: str) -> Dict[str, Any]:
   return {'session_id': session_id, 'summary': _serialize_summary(summary)}
 
 
+@app.get('/conversion/vulnerabilities/{session_id}')
+async def conversion_vulnerabilities(session_id: str) -> Dict[str, Any]:
+  summary = conversion_manager.get_summary(session_id)
+  if not summary:
+    raise HTTPException(status_code=404, detail='Session not found.')
+  issues = summary.quality_report.issues if summary.quality_report else []
+  alerts = [issue.__dict__ for issue in issues if issue.severity.lower() != 'info']
+  return {'issues': alerts}
+
+
 @app.get('/conversion/manual/{session_id}')
 async def conversion_manual_list(session_id: str) -> Dict[str, Any]:
   fixes = conversion_manager.list_manual_fixes(session_id)
@@ -449,6 +471,31 @@ async def conversion_manual_apply(session_id: str, chunk_id: str, payload: Manua
     'status': 'applied',
     'summary': _serialize_summary(summary)
   }
+
+
+@app.post('/conversion/manual/{session_id}/{chunk_id}/skip')
+async def conversion_manual_skip(session_id: str, chunk_id: str, payload: ManualFixSkipPayload) -> Dict[str, Any]:
+  try:
+    conversion_manager.skip_manual_fix(session_id, chunk_id, payload.note)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  summary = conversion_manager.get_summary(session_id)
+  return {
+    'session_id': session_id,
+    'chunk_id': chunk_id,
+    'status': 'skipped',
+    'summary': _serialize_summary(summary)
+  }
+
+
+@app.post('/conversion/learning/apply_all')
+async def conversion_apply_learned(payload: ApplyPatternsPayload) -> Dict[str, Any]:
+  try:
+    applied = conversion_manager.apply_learned_patterns(payload.session_id)
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  summary = conversion_manager.get_summary(payload.session_id)
+  return {'applied': applied, 'summary': _serialize_summary(summary)}
 
 
 def _serialize_summary(summary: Optional[Any]) -> Optional[Dict[str, Any]]:
@@ -575,6 +622,12 @@ async def delete_template(name: str) -> Dict[str, Any]:
   return {'status': 'deleted', 'name': name}
 
 
+@app.post('/conversion/webhook/test')
+async def test_webhooks(payload: WebhookTestPayload) -> Dict[str, Any]:
+  results = await conversion_manager.test_webhooks([entry.dict() for entry in payload.webhooks])
+  return {'results': results}
+
+
 @app.get('/community/metrics')
 async def community_metrics() -> Dict[str, Any]:
   stats = conversion_manager.session_store.statistics()
@@ -607,6 +660,11 @@ async def community_report(payload: IssueReportPayload) -> Dict[str, Any]:
 
 @app.get('/logs/recent')
 async def recent_logs(limit: int = 200) -> Dict[str, Any]:
+  return {'entries': event_logger.recent(limit)}
+
+
+@app.get('/conversion/build_output')
+async def conversion_build_output(limit: int = 200) -> Dict[str, Any]:
   return {'entries': event_logger.recent(limit)}
 
 

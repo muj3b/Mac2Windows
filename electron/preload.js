@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld('macWinBridge', {
     chunk_id: chunkId,
     ...payload
   }),
+  skipManualFix: (sessionId, chunkId, note) => safeInvoke('backend:skipManualFix', {
+    session_id: sessionId,
+    chunk_id: chunkId,
+    note
+  }),
   listBackupProviders: () => safeInvoke('backend:listBackupProviders'),
   startBackupOAuth: (provider, config) => safeInvoke('backend:startBackupOAuth', { provider, config }),
   createBackupCredential: (provider, body) => safeInvoke('backend:createBackupCredential', { provider, body }),
@@ -37,8 +42,15 @@ contextBridge.exposeInMainWorld('macWinBridge', {
   previewConversion: (payload) => safeInvoke('backend:previewConversion', payload),
   resumeFailedConversion: (payload) => safeInvoke('backend:resumeFailedConversion', payload),
   startBatchConversion: (payload) => safeInvoke('backend:startBatchConversion', payload),
+  getCostEstimate: (payload) => safeInvoke('backend:getCostEstimate', payload),
+  getVulnerabilities: (sessionId) => safeInvoke('backend:getVulnerabilities', sessionId),
+  getBuildOutput: (limit = 200) => safeInvoke('backend:getBuildOutput', limit),
+  testWebhook: (payload) => safeInvoke('backend:webhookTest', payload),
+  applyLearnedPatterns: (sessionId) => safeInvoke('backend:applyLearnedPatterns', { session_id: sessionId }),
   getCommunityMetrics: () => safeInvoke('backend:getCommunityMetrics'),
   submitIssueReport: (payload) => safeInvoke('backend:submitIssueReport', payload),
+  exportTemplate: (name, template) => safeInvoke('backend:exportTemplate', { name, template }),
+  importTemplate: () => safeInvoke('backend:importTemplate'),
   openExternal: (url) => safeInvoke('app:openExternal', url),
   openPath: (targetPath) => safeInvoke('app:openPath', targetPath)
 });

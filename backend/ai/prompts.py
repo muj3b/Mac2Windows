@@ -27,6 +27,7 @@ def build_conversion_prompt(
   previous_summary = previous_summary or '(none)'
 
   guidelines = _directional_guidelines(direction, target_language)
+  pitfall_examples = _common_pitfall_examples(direction)
 
   return f"""You are an expert software engineer specialising in cross-platform conversions.
 Convert the following {source_language} code into **{target_language}** suitable for the target platform.
@@ -48,6 +49,9 @@ TARGET CONTEXT
 
 GUIDELINES
 {guidelines}
+
+COMMON PITFALL EXAMPLES
+{pitfall_examples}
 
 DEPENDENCY MAPPINGS
 {mapping_section}
@@ -102,6 +106,54 @@ def _directional_guidelines(direction: str, target_language: str) -> str:
 - Convert dependency injection patterns to Swift protocols/structs.
 - Translate WPF/WinUI bindings into SwiftUI state/binding patterns.
 - Map Dispatcher/Task scheduling to DispatchQueue or Task.detached as appropriate."""
+
+
+def _common_pitfall_examples(direction: str) -> str:
+  if direction == 'mac-to-win':
+    return """Example 1 – Layout conversions
+Source (Swift)
+  view.frame = CGRect(x: 16, y: 20, width: 180, height: 72)
+Target (C#/XAML)
+  <!-- Avoid setting Width/Height directly; prefer Grid/StackPanel -->
+  <Grid Margin="16,20,16,0">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="Auto" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+  </Grid>
+
+Example 2 – Escaping closures
+Source (Swift)
+  func fetchUser(completion: @escaping (Result<User, Error>) -> Void)
+Target (C#)
+  public void FetchUser(Action<Result<User, Exception>> completion)
+
+Example 3 – UserDefaults → LocalSettings
+Source (Swift)
+  let launchCount = UserDefaults.standard.integer(forKey: "launchCount")
+Target (C#)
+  var values = ApplicationData.Current.LocalSettings.Values;
+  var launchCount = values.TryGetValue("launchCount", out object stored) && stored is int count ? count : 0;
+"""
+  return """Example 1 – Layout conversions
+Source (C# / XAML)
+  <StackPanel Width="180" Height="72">...</StackPanel>
+Target (SwiftUI)
+  VStack { ... }
+    .frame(maxWidth: .infinity, alignment: .leading)
+
+Example 2 – Delegates → Escaping closures
+Source (C#)
+  public void Fetch(Action<string> callback)
+Target (Swift)
+  func fetch(completion: @escaping (String) -> Void)
+
+Example 3 – LocalSettings → UserDefaults
+Source (C#)
+  var launchCount = (int?)settings.Values["launchCount"] ?? 0;
+Target (Swift)
+  let launchCount = UserDefaults.standard.integer(forKey: "launchCount")
+"""
 
 
 def build_review_prompt(
