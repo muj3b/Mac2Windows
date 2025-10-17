@@ -1,22 +1,40 @@
 # Mac ↔ Windows Universal Code Converter
 
-End-to-end automation for translating macOS apps to Windows (and the reverse) with zero-touch AI orchestration, quality assurance, reporting, and collaboration features.
+End-to-end automation for translating macOS apps to Windows (and the reverse) with AI orchestration, quality gates, cost controls, and collaboration tooling.
 
-## Project Layout
+## Table of Contents
+1. [Architecture Overview](#architecture-overview)
+2. [Getting Started](#getting-started)
+3. [AI Provider Setup](#ai-provider-setup)
+4. [Cloud Backup OAuth](#cloud-backup-oauth)
+5. [Using the Dashboard](#using-the-dashboard)
+6. [Webhooks & CI/CD](#webhooks--cicd)
+7. [Cost Controls & Preview Mode](#cost-controls--preview-mode)
+8. [Manual Fix & Error Recovery](#manual-fix--error-recovery)
+9. [Batch Conversion & Templates](#batch-conversion--templates)
+10. [Community & Sharing](#community--sharing)
+11. [Troubleshooting](#troubleshooting)
+12. [FAQ](#faq)
 
-- `electron/` – Electron shell with UI, IPC bridge, and process management.
-  - `main.js` launches the renderer and supervises the Python backend.
-  - `preload.js` exposes a safe bridge API to the renderer.
-  - `src/renderer/` holds the HTML/CSS/JS for the main dashboard.
-- `backend/` – FastAPI service orchestrating detection, AI routing, conversion pipeline, QA, reporting, logging, and persistence.
-  - `detection/scanner.py` – language/framework/dependency discovery and analysis heuristics.
-  - `ai/` – provider registry, model router, and orchestrator enforcing anti-phase prompts.
-  - `conversion/` – chunk planner, progress tracker, session manager, and state store integrations.
-  - `quality/engine.py` – syntax/dependency/API/security checks plus AI self-review.
-  - `reports/` & `storage/` – HTML report generation, backups, embeddings, and session persistence.
-  - `learning/memory.py` – captures user corrections for future conversions.
-  - `logging/event_logger.py` – structured event log for debugging and audits.
-- `data/` – Created on first run to persist SQLite state and ChromaDB collections.
+## Architecture Overview
+
+```
+monorepo
+├── electron/           # Electron shell + renderer UI
+│   ├── main.js         # Launches renderer + supervises Python backend
+│   ├── preload.js      # Sandboxed bridge API exposed to the renderer
+│   └── src/renderer/   # HTML/CSS/JS for the dashboard
+└── backend/            # FastAPI orchestration service
+    ├── conversion/     # Session manager, work planner, cleanup, cost control
+    ├── ai/             # Provider registry, model router, orchestrator
+    ├── detection/      # Language/framework/dependency discovery
+    ├── quality/        # Syntax/build/QA + AI self-review
+    ├── reports/        # Conversion report + diff generator
+    ├── storage/        # SQLite/ChromaDB persistence, template repo
+    └── security/       # License + vulnerability scanners
+```
+
+Key backend services expose REST APIs for conversion management, template storage, webhook dispatch, community metrics, and reporting. The renderer communicates exclusively through the preload bridge to maintain sandboxed isolation.
 
 ## Getting Started
 
@@ -28,7 +46,7 @@ End-to-end automation for translating macOS apps to Windows (and the reverse) wi
    pip install -r backend/requirements.txt
    ```
 
-2. **Install Electron dependencies**
+2. **Install renderer dependencies**
    ```bash
    cd electron
    npm install
@@ -36,101 +54,250 @@ End-to-end automation for translating macOS apps to Windows (and the reverse) wi
 
 3. **Run the application**
    ```bash
-   # from the project root (ensure the virtualenv is active)
+   # from the project root with the virtualenv activated
    npm --prefix electron start
    ```
-   The Electron process will launch the FastAPI backend automatically (bound to `127.0.0.1:6110`).
+   The Electron process spawns the FastAPI backend automatically (default `127.0.0.1:6110`).
 
-### Configure AI providers
+## AI Provider Setup
 
-Set the relevant environment variables before starting the app:
+The converter auto-detects configured providers and displays every model exposed by the backend registry. Set the relevant environment variables before launching:
 
-- `ANTHROPIC_API_KEY` *(optional)* – enables Claude Sonnet/Opus endpoints.
-- `ANTHROPIC_API_URL` *(optional)* – override for private Claude gateways.
-- `OPENAI_API_KEY` *(optional)* – enables GPT‑5, GPT‑5 mini, GPT‑5 nano.
-- `OPENAI_BASE_URL` *(optional)* – override for Azure/OpenAI-compatible endpoints.
-- `OPENAI_ORG_ID` *(optional)* – organisation header for OpenAI.
-- `OLLAMA_BASE_URL` *(default `http://127.0.0.1:11434`)* – local Ollama instance.
+| Provider          | Environment variables                                                                                                      | Notes |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------|-------|
+| OpenAI / Azure    | `OPENAI_API_KEY`, `OPENAI_BASE_URL` (Azure), `OPENAI_ORG_ID`                                                                | GPT‑5, GPT‑5 mini, GPT‑5 nano |
+| Anthropic         | `ANTHROPIC_API_KEY`, `ANTHROPIC_API_URL`                                                                                    | Claude Sonnet / Opus |
+| Google           | `GOOGLE_VERTEX_URL`, `GOOGLE_VERTEX_TOKEN` *(if using Vertex or Gemini-compatible gateway)*                                | Gemini 1.5/Flash |
+| Ollama (local)    | `OLLAMA_BASE_URL` *(default `http://127.0.0.1:11434`)*                                                                      | Llama3, CodeLlama, custom ggml |
 
-The backend automatically detects configured providers and routes calls to Claude, OpenAI, or Ollama with streaming responses, retries, token accounting, and cost tracking.
+Additional notes:
+- Tokens, cost, and provider metadata flow into the session summary and webhook payloads.
+- Model fallbacks are configured in the **Settings → Performance & AI Strategy** panel.
+- Offline-only mode forces Ollama/local providers (indicated in the status pill).
 
-### Resource & project conversion stack
+## Cloud Backup OAuth
 
-- Additional Python dependency: Pillow (for image rescaling) is installed via `backend/requirements.txt`.
-- Resource stage now converts Storyboard/XIB ⇄ XAML, `.strings` ⇄ `.resx`, and Info.plist ⇄ app.manifest.
-- Project stage generates `.sln/.csproj` for Windows targets and `.xcodeproj` skeletons for macOS.
-- Dependency stage maps CocoaPods/SwiftPM ↔ NuGet, emitting `packages.config` or `Package.swift` as appropriate.
-- Validation stage runs `dotnet build` or `swiftc -typecheck` when toolchains are available; issues surface in the progress log and summary notes.
-- Advanced tooling (Phase 3): git pre/post snapshots, incremental conversion, diff viewer exports, AI self-review, vulnerability/license checks, cloud backups, benchmark summaries, webhook notifications, and manual fallback queues.
-- Asset optimisation (Phase 3 step 4): PNG/JPEG resources are compressed automatically (configurable quality and megapixel caps via conversion settings). Savings are logged in the session notes and included in reports.
-- Vulnerability & license reporting: dependencies are checked against OSV during conversion; SPDX-based license scanning flags high-risk combinations. Issues surface in quality reports and can trigger manual fix workflows.
+Enable cloud mirroring in **Settings → Backup & Recovery**. Credentials are encrypted via `data/credentials.db` and managed through the UI.
 
-## Current Capabilities
+### Google Drive (OAuth)
+1. Create a Google Cloud project and OAuth consent screen (external).
+2. Create OAuth client credentials (Desktop).
+3. In the UI, enter *Client ID*, *Client Secret*, optional *Scopes* (default `https://www.googleapis.com/auth/drive.file`).
+4. Click **Connect**; a browser window opens. Approve access and return—credentials appear in the drop-down.
 
-- **Smart orchestration** – direction-aware UI with drag‑and‑drop intake, health monitors, webhook hooks, and debug instrumentation.
-- **Deep project intelligence** – language/framework/dependency discovery, risk analysis, target suggestions, and automatic dependency graph ordering.
-- **Adaptive AI pipeline**
-  - Model router balances cost/speed/quality with strategy cues.
-  - Anti-phase prompts force complete outputs; retries auto-resume where models stop.
-  - RAG context (ChromaDB or in-memory) injects similar patterns, references, and prior decisions.
-  - Learning memory applies user corrections to future conversions.
-- **Conversion engine** – resources, dependencies, setup, code, tests, and quality stages with pause/resume, auto-save, and batch scheduling.
-- **Quality assurance & reporting** – syntax + build heuristics, dependency/API/resource/security checks, AI self-review, vulnerability/license alerts, performance benchmarks, backup/rollback, and searchable HTML reports with per-file diffs.
-- **Cloud backups & retention** – encrypted credential store with local/GDrive/Dropbox/OneDrive uploads, per-session metadata, and retention limits driven from the UI.
-- **Interactive reports** – consolidated HTML report with summary metrics, searchable diff viewer, severity filters, and one-click AI explanations for any changed line.
-- **Automated test scaffolding** – XCTest ↔ NUnit conversions with post-conversion execution, failure surfacing, and TODOs for complex cases.
-- **Performance benchmarking** – cross-project UI/data parsing benchmarks with regression detection and reporting.
-- **Collaboration tooling** – shared templates, detailed logs, debug prompt capture, webhook notifications, and conversion memory for organization-wide reuse.
+### Dropbox
+1. Create a Dropbox app (Scoped access → App folder or Full Dropbox).
+2. Generate an app key/secret.
+3. Provide the key/secret in the UI, leave scopes empty (Dropbox scopes are implied).
+4. Complete the OAuth flow and select the stored credential.
 
-To confirm AI connectivity, start the app with valid API keys and use the UI's model selector to run a quick request (e.g. prompt “Convert this Swift code to C#: `let x = 5`”). Streaming responses, token/cost tracking, and error handling are visible in the progress panel and logs.
+### OneDrive / Microsoft 365
+1. Register an Azure AD application (public client, device flow).
+2. Supply *Client ID*, optional *Tenant* (default `common`), add scopes like `Files.ReadWrite.All offline_access`.
+3. Complete the OAuth dance; new credentials appear in the selector.
 
-## Using the Conversion Engine
+Local backups can be targeted to any writable directory (e.g. external drive) via the **Save Path** button. Retention limits are enforced per session.
 
-1. Drag a project onto the app and run auto-detection.
-2. Configure conversion/performance/AI settings (or load a saved template), choose your model/provider, and optionally set webhooks.
-3. Hit **Start Conversion**. Progress updates show per-stage completion, current file, ETA, token usage, and cost. Pause/resume anytime.
-4. Review the generated assets: converted project under `<ProjectName>.<direction>.converted`, HTML report + diffs in `/reports`, backups in `/backups`, and logs via the UI.
-5. Trigger rollbacks, share templates, or schedule batch conversions as needed.
+## Using the Dashboard
 
-## Cloud Backups
+The UI is organised into four tabs:
 
-- Enable the **Cloud Backup** toggle in the settings panel to mirror the converted target after each run.
-- Supported providers: local filesystem, Google Drive, Dropbox, and OneDrive. OAuth flows launch in your default browser and tokens are encrypted via `data/credentials.db`.
-- Configure retention (number of archives to keep), remote path template (supports `{project}`, `{direction}`, `{session}`, `{timestamp}`), and credential selection directly from the UI. Local backups can target any writable directory.
-- Each backup embeds `conversion_metadata.json` (tokens, cost, quality summary, notes) inside the archive. The consolidated HTML report lists recent backups and links to cloud copies when available.
-- Rollbacks continue to reference the `backups/` folder under each converted project; cloud copies are treated as off-site mirrors.
+1. **Dashboard** – project intake, health monitors, preview summary, progress timeline, manual fix queue, vulnerability dashboard, cost tracker, and build console.
+2. **Settings** – conversion preferences, performance/AI tuning, cost guardrails, webhook editor, template manager, and backup configuration.
+3. **Batch** – enqueue multiple projects (direction + paths) and run them sequentially with shared settings.
+4. **Community** – anonymised success metrics, leaderboard, and one-click issue reports.
 
-## Automated Test Generation
+### Manual Fix Queue
+- Pending fixes appear in the left column; selecting one pre-fills the notes area.
+- Paste or type the corrected code and hit **Apply Manual Fix** to override the generated output.
+- Applied fixes update the progress tracker and feed the learning memory for subsequent conversions.
 
-- Test files detected during planning are fed through a specialised prompt to translate XCTest ↔ NUnit (or vice versa) while preserving assertions, fixtures, and naming conventions.
-- Converted tests are written directly to the target project tree. Failures or provider issues automatically enqueue manual-fix tasks with contextual notes.
-- After conversion the harness executes `dotnet test` or `swift test` (tooling permitting). Results flow into the quality report, progress dashboard, and summary notes.
-- Any failing suites generate actionable TODO entries and appear in the HTML report’s summary + quality tabs.
+### Vulnerability Alerts
+- Security and license issues flagged during dependency conversion surface here.
+- Severity is mirrored in the quality report and webhook payloads.
+- Critical issues automatically enqueue manual fixes.
 
-## Performance Benchmarks
+### Build Console
+- Streams backend logs (fetch via **Refresh**) including build/test output, AI retry messages, and warnings.
+- Enable debug mode to capture prompt metadata for triage.
 
-- A lightweight benchmark harness parses representative UI and data assets in both the original and converted projects.
-- Metrics capture wall-clock duration, CPU time, and memory deltas for operations such as XML layout parsing and resource loading.
-- Regression thresholds (20% by default) automatically flag slowdowns in the quality report and conversion summary.
-- Benchmark results appear in the interactive report (summary tab) with side-by-side comparisons and regression highlighting.
+## Webhooks & CI/CD
 
-## Interactive Reports & Diff Viewer
+### Event Types
+| Event | Description |
+|-------|-------------|
+| `conversion.started`   | Fired as soon as a session begins (includes preview estimate, applied settings, project type).
+| `conversion.quality_ready` | Emitted after the quality stage completes (includes quality score, issues, benchmarks, cleanup results).
+| `conversion.paused`    | Fired when a session pauses (manual, cost budget, or error).
+| `conversion.completed` | Fired when all stages finish successfully (full summary, diff artifacts, backup links).
+| `conversion.failed`    | Fired if an unrecoverable error occurs (error note, manual fix counts, latest stage).
 
-- The **Open Conversion Report** button launches a self-contained HTML dashboard with summary metrics, quality outcomes, and a searchable diff explorer.
-- Filter files by severity, search by name, or drill into any change. Selecting a line requests an on-demand explanation from the same model/provider used for the conversion.
-- Reports render locally (no network dependency) and can be exported to PDF via the built-in **Export PDF** button or the browser’s print dialogue.
-- Quality issues surface in a dedicated tab with categorised severity. AI explanations require the session to remain active so the backend can reuse the cached provider credentials.
+### Payload Structure (excerpt)
+```json
+{
+  "session_id": "abcd1234",
+  "status": "completed",
+  "direction": "mac-to-win",
+  "project_type": "game",
+  "offline_mode": false,
+  "summary": {
+    "overall_percentage": 1.0,
+    "converted_files": 128,
+    "total_files": 132,
+    "elapsed_seconds": 843,
+    "tokens_used": 98542,
+    "cost_usd": 23.17
+  },
+  "stage_progress": {
+    "CODE": {"completed": 98, "total": 99, "percentage": 0.99}
+  },
+  "cleanup_report": {
+    "unused_assets": ["Assets/legacy_logo.png"],
+    "total_bytes_reclaimed": 4194304,
+    "auto_deleted": []
+  },
+  "cost": {
+    "total": 23.17,
+    "max_budget": 50.0,
+    "percent": 0.46,
+    "warnings": []
+  },
+  "diff_artifacts": [
+    {"source": "AppDelegate.swift", "target": "Program.cs", "diff_html": "/reports/AppDelegate.diff.html"}
+  ],
+  "backups": [{"provider": "gdrive", "remote_url": "https://drive.google.com/..."}],
+  "manual_queue": [],
+  "notes": ["Conversion finished", "Benchmarks completed without regressions."]
+}
+```
+Custom headers are supported (e.g. `Authorization: Bearer ...`). Webhook retries use exponential backoff (2.5s base, 3 attempts).
 
-## Key APIs & Integrations
+### GitHub Actions Sample
+```yaml
+name: Trigger Conversion
+on:
+  workflow_dispatch:
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Call converter
+        run: |
+          curl -X POST "http://127.0.0.1:6110/conversion/start" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "project_path": "${{ github.workspace }}/MyApp",
+              "target_path": "${{ github.workspace }}/MyApp.Win",
+              "direction": "mac-to-win",
+              "provider_id": "openai-compatible",
+              "model_identifier": "gpt-5",
+              "webhooks": [{
+                "url": "${{ secrets.DEPLOY_HOOK }}",
+                "headers": {"Authorization": "Bearer ${{ secrets.DEPLOY_TOKEN }}"}
+              }]
+            }'
+```
 
-- `POST /conversion/start|pause|resume|status/{id}` – session lifecycle.
-- `POST /conversion/batch` – queue multiple projects with shared settings.
-- `POST /conversion/rollback` – unpack the latest (or chosen) backup for comparison.
-- `GET|POST /settings/templates` – manage team presets.
-- `POST /settings/debug`, `GET /logs/recent` – enable verbose tracing and retrieve prompt/context logs.
+### GitLab CI Sample
+```yaml
+convert:
+  stage: build
+  image: python:3.11
+  script:
+    - pip install requests
+    - |
+      python - <<'PY'
+      import requests, os
+      payload = {
+        "project_path": os.getenv("CI_PROJECT_DIR") + "/src",
+        "target_path": os.getenv("CI_PROJECT_DIR") + "/src.win",
+        "direction": "mac-to-win",
+        "provider_id": "ollama",
+        "model_identifier": "ollama::llama3",
+        "webhooks": [
+          {"url": os.getenv("CI_API_V4_URL") + "/projects/${CI_PROJECT_ID}/trigger", "secret_token": os.getenv("WEBHOOK_SECRET")}
+        ]
+      }
+      requests.post("http://converter.internal:6110/conversion/start", json=payload).raise_for_status()
+      PY
+```
 
-## Roadmap Ideas
+### Jenkinsfile Snippet
+```groovy
+pipeline {
+  agent any
+  stages {
+    stage('Convert') {
+      steps {
+        script {
+          httpRequest httpMode: 'POST', contentType: 'APPLICATION_JSON', url: 'http://converter.internal:6110/conversion/start',
+                      requestBody: groovy.json.JsonOutput.toJson([
+                        project_path: env.WORKSPACE + '/app',
+                        target_path : env.WORKSPACE + '/app.win',
+                        direction   : 'mac-to-win',
+                        provider_id : 'openai-compatible',
+                        model_identifier: 'gpt-5-mini',
+                        cost: [max_budget_usd: 30, warn_percent: 0.7]
+                      ])
+        }
+      }
+    }
+  }
+}
+```
 
-- Deeper static analysis and actual toolchain builds when SDKs are available.
-- Integrated diff viewer and rollback selector inside the UI.
-- Extended vulnerability feeds and license compatibility policies.
+## Cost Controls & Preview Mode
+
+- **Preview Conversion** analyses the project without issuing AI calls, estimating cost, time, and impacted files. Exclude specific folders via templates or exclusions.
+- **Cost Guardrails** halt sessions when the configured budget is exceeded. Warnings trigger model fallback (e.g. GPT‑5 → GPT‑5 mini → Ollama) if auto-switch is enabled.
+- Live spend and percent-of-budget are shown in the dashboard and sent to webhooks.
+- Fallbacks can also be configured for quality (AI settings) or manual via the settings panel.
+
+## Manual Fix & Error Recovery
+
+- Provider failures, validation issues, and manual review requests populate the queue automatically.
+- Fixes are persisted and re-applied to matching chunks during resume runs.
+- The **Resume Failed** button rehydrates previous progress, cost totals, manual fixes, and quality report before resuming the pipeline.
+- Error events never abort the entire conversion; failed chunks are flagged for manual action without blocking subsequent stages.
+
+## Batch Conversion & Templates
+
+- Add multiple projects in the **Batch** tab—each entry captures source, target, and direction. The batch runner reuses the settings from the **Settings** tab.
+- Batch execution calls the REST API for every project and surfaces new session IDs in the status pill.
+- Templates store conversion/performance/AI presets plus optional metadata (owner, tags). Share templates across the team, delete obsolete ones, or load with a single click.
+
+## Community & Sharing
+
+- **Metrics** – anonymised stats (completion rate, average cost/quality, direction mix) sourced from the persistent session store.
+- **Leaderboard** – top sessions ranked by quality score. Useful for internal showcases or regression spotting.
+- **Report Issue** – bundles logs, latest summary, and optional contact email into `data/community/reports/report_<timestamp>.json`. Users review before sharing.
+- **Template Repository** – saved templates live under `data/templates` with metadata tracked in `templates_index.json`.
+
+## Troubleshooting
+
+| Symptom | Resolution |
+|---------|------------|
+| Conversion stalls at 0% | Verify backend health, ensure AI credentials are valid, and check logs for provider errors. Resume after correcting. |
+| Cost budget reached | Increase the limit in settings or enable auto-switch with cheaper fallback models. |
+| OAuth window fails to open | Copy the displayed authorization URL into a browser manually; upon success the backend displays the credential. |
+| Webhook not invoked | Check retry logs in the console, confirm the URL accepts POST+JSON, ensure secret header matches your service. |
+| Manual fix not applied | Ensure code is supplied; the override writes directly to the output file and updates the incremental cache. |
+
+## FAQ
+
+**Do I need the full Apple or Windows SDKs installed?**
+Only for optional build/test validation stages. The converter itself operates on source text.
+
+**Can I run entirely offline?**
+Yes—select Ollama (or a local model) and enable *Force offline models only*. Cost tracking switches to local-only mode.
+
+**Where are backups stored?**
+Per session under `<target>/backups/`. Cloud mirrors (Drive/Dropbox/OneDrive) contain identical archives plus `conversion_metadata.json`.
+
+**How are manual fixes reused?**
+Applied fixes update the learning memory. After three identical overrides the converter auto-applies the patch to similar chunks in future sessions.
+
+**What security data is collected?**
+Only anonymised aggregate metrics (number of conversions, average quality/cost) for the community dashboard. Disable metrics by clearing `data/community`.
+

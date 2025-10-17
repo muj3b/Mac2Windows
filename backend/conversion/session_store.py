@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.conversion.models import (
   SessionState,
@@ -20,7 +20,10 @@ from backend.conversion.models import (
   AISettings,
   GitSettings,
   BackupSettings,
-  ManualFixEntry
+  ManualFixEntry,
+  CostSettings,
+  CleanupReport,
+  PreviewEstimate
 )
 
 
@@ -79,7 +82,10 @@ class ConversionSessionStore:
         ('incremental', 'INTEGER'),
         ('manual_queue_json', 'TEXT'),
         ('test_results_json', 'TEXT'),
-        ('benchmarks_json', 'TEXT')
+        ('benchmarks_json', 'TEXT'),
+        ('cost_settings_json', 'TEXT'),
+        ('cleanup_report_json', 'TEXT'),
+        ('preview_estimate_json', 'TEXT')
       ):
         self._ensure_column(conn, column, definition)
       conn.commit()
@@ -149,6 +155,9 @@ class ConversionSessionStore:
       'manual_queue_json': json.dumps({key: entry.to_dict() for key, entry in state.manual_queue.items()}),
       'test_results_json': json.dumps(state.test_results) if state.test_results else None,
       'benchmarks_json': json.dumps(state.benchmarks) if state.benchmarks else None,
+      'cost_settings_json': json.dumps(state.cost_settings.__dict__) if state.cost_settings else None,
+      'cleanup_report_json': json.dumps(state.cleanup_report.summary()) if state.cleanup_report else None,
+      'preview_estimate_json': json.dumps(state.preview_estimate.summary()) if state.preview_estimate else None,
       'created_at': state.created_at,
       'updated_at': state.updated_at
     }
@@ -160,14 +169,14 @@ class ConversionSessionStore:
           paused, summary_notes_json, symbol_table_json,
           quality_report_json, conversion_settings_json, performance_settings_json,
           ai_settings_json, backup_settings_json, webhooks_json, conversion_report_json, git_settings_json, incremental, manual_queue_json, test_results_json, benchmarks_json,
-          created_at, updated_at
+          cost_settings_json, cleanup_report_json, preview_estimate_json, created_at, updated_at
         )
         VALUES (
           :id, :project_path, :target_path, :direction, :stage_progress_json, :chunks_json,
           :paused, :summary_notes_json, :symbol_table_json,
           :quality_report_json, :conversion_settings_json, :performance_settings_json,
           :ai_settings_json, :backup_settings_json, :webhooks_json, :conversion_report_json, :git_settings_json, :incremental, :manual_queue_json, :test_results_json, :benchmarks_json,
-          :created_at, :updated_at
+          :cost_settings_json, :cleanup_report_json, :preview_estimate_json, :created_at, :updated_at
         )
         ON CONFLICT(id) DO UPDATE SET
           project_path=excluded.project_path,
@@ -190,6 +199,9 @@ class ConversionSessionStore:
           manual_queue_json=excluded.manual_queue_json,
           test_results_json=excluded.test_results_json,
           benchmarks_json=excluded.benchmarks_json,
+          cost_settings_json=excluded.cost_settings_json,
+          cleanup_report_json=excluded.cleanup_report_json,
+          preview_estimate_json=excluded.preview_estimate_json,
           created_at=excluded.created_at,
           updated_at=excluded.updated_at;
         """,
@@ -281,6 +293,29 @@ class ConversionSessionStore:
       }
       test_results = json.loads(row['test_results_json']) if row['test_results_json'] else None
       benchmarks = json.loads(row['benchmarks_json']) if row['benchmarks_json'] else {}
+      cost_settings = CostSettings(**json.loads(row['cost_settings_json'])) if row['cost_settings_json'] else CostSettings()
+      cleanup_report = None
+      if row['cleanup_report_json']:
+        cleanup_data = json.loads(row['cleanup_report_json'])
+        cleanup_report = CleanupReport(
+          unused_assets=cleanup_data.get('unused_assets', []),
+          unused_dependencies=cleanup_data.get('unused_dependencies', []),
+          total_bytes_reclaimed=cleanup_data.get('total_bytes_reclaimed', 0),
+          auto_deleted=cleanup_data.get('auto_deleted', []),
+          scanned_assets=cleanup_data.get('scanned_assets', 0),
+          scanned_dependencies=cleanup_data.get('scanned_dependencies', 0)
+        )
+      preview_estimate = None
+      if row['preview_estimate_json']:
+        preview_data = json.loads(row['preview_estimate_json'])
+        preview_estimate = PreviewEstimate(
+          total_files=preview_data.get('total_files', 0),
+          impacted_files=preview_data.get('impacted_files', 0),
+          estimated_tokens=preview_data.get('estimated_tokens', 0),
+          estimated_cost_usd=preview_data.get('estimated_cost_usd', 0.0),
+          estimated_minutes=preview_data.get('estimated_minutes', 0.0),
+          stage_breakdown=preview_data.get('stage_breakdown', {})
+        )
 
       return SessionState(
         session_id=row['id'],
@@ -305,9 +340,53 @@ class ConversionSessionStore:
         git_settings=git_settings,
         manual_queue=manual_queue,
         test_results=test_results,
-        benchmarks=benchmarks
+        benchmarks=benchmarks,
+        cost_settings=cost_settings,
+        cleanup_report=cleanup_report,
+        preview_estimate=preview_estimate
       )
 
+
+  def statistics(self) -> Dict[str, Any]:
+    with _connect(self.db_path) as conn:
+      rows = conn.execute(
+        'SELECT id, direction, stage_progress_json, chunks_json, quality_report_json FROM conversion_sessions'
+      ).fetchall()
+    total_cost = 0.0
+    directions: Dict[str, int] = {}
+    completed = 0
+    quality_scores: List[float] = []
+    leaderboard: List[Dict[str, Any]] = []
+
+    for row in rows:
+      direction = row['direction']
+      directions[direction] = directions.get(direction, 0) + 1
+      chunks_data = json.loads(row['chunks_json'])
+      total_cost += sum(entry.get('cost_usd', 0.0) for entry in chunks_data.values())
+      stage_progress = json.loads(row['stage_progress_json'])
+      if all(progress.get('status') == 'completed' for progress in stage_progress.values()):
+        completed += 1
+      quality_score = None
+      if row['quality_report_json']:
+        report_data = json.loads(row['quality_report_json'])
+        issues = report_data.get('issues', [])
+        severe = sum(1 for issue in issues if issue.get('severity', '').lower() in {'error', 'critical'})
+        quality_score = max(0.0, 1.0 - (severe * 0.2 + len(issues) * 0.05))
+        quality_scores.append(quality_score)
+        leaderboard.append({'session_id': row['id'], 'score': quality_score, 'issues': len(issues)})
+
+    leaderboard = sorted(leaderboard, key=lambda entry: entry['score'], reverse=True)[:5]
+    avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else None
+    avg_cost = total_cost / len(rows) if rows else 0.0
+
+    return {
+      'total_sessions': len(rows),
+      'completed_sessions': completed,
+      'avg_cost_usd': round(avg_cost, 4),
+      'directions': directions,
+      'avg_quality_score': round(avg_quality, 3) if avg_quality is not None else None,
+      'leaderboard': leaderboard
+    }
 
   def _ensure_column(self, conn: sqlite3.Connection, column: str, definition: str) -> None:
     info = conn.execute('PRAGMA table_info(conversion_sessions)').fetchall()

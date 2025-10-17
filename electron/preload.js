@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('macWinBridge', {
   listTemplates: () => safeInvoke('backend:listTemplates'),
   loadTemplate: (name) => safeInvoke('backend:loadTemplate', name),
   saveTemplate: (payload) => safeInvoke('backend:saveTemplate', payload),
+  shareTemplate: (payload) => safeInvoke('backend:shareTemplate', payload),
+  deleteTemplate: (name) => safeInvoke('backend:deleteTemplate', name),
   fetchLogs: (limit = 200) => safeInvoke('backend:fetchLogs', limit),
   setDebugMode: (enabled) => safeInvoke('backend:setDebugMode', { enabled }),
   prepareRollback: (sessionId, backupPath = null) => safeInvoke('backend:prepareRollback', { session_id: sessionId, backup_path: backupPath }),
@@ -32,6 +34,11 @@ contextBridge.exposeInMainWorld('macWinBridge', {
   createBackupCredential: (provider, body) => safeInvoke('backend:createBackupCredential', { provider, body }),
   deleteBackupCredential: (credentialId) => safeInvoke('backend:deleteBackupCredential', credentialId),
   listSessionBackups: (sessionId) => safeInvoke('backend:listSessionBackups', sessionId),
+  previewConversion: (payload) => safeInvoke('backend:previewConversion', payload),
+  resumeFailedConversion: (payload) => safeInvoke('backend:resumeFailedConversion', payload),
+  startBatchConversion: (payload) => safeInvoke('backend:startBatchConversion', payload),
+  getCommunityMetrics: () => safeInvoke('backend:getCommunityMetrics'),
+  submitIssueReport: (payload) => safeInvoke('backend:submitIssueReport', payload),
   openExternal: (url) => safeInvoke('app:openExternal', url),
   openPath: (targetPath) => safeInvoke('app:openPath', targetPath)
 });

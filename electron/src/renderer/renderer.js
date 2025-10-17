@@ -1,115 +1,172 @@
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
 const state = {
   direction: 'mac-to-win',
   projectPath: null,
   detection: null,
-  providerMap: new Map(),
-  resourceTimer: null,
-  healthTimer: null,
   sessionId: null,
   progressTimer: null,
-  targetPath: null,
   templates: [],
-  backupProviders: []
+  webhooks: [],
+  manualFixes: [],
+  selectedManualFix: null,
+  previewEstimate: null,
+  batchQueue: [],
+  community: null,
+  costSettings: {
+    enabled: true,
+    max_budget_usd: 50,
+    warn_percent: 0.8,
+    auto_switch_model: true,
+    fallback_model_identifier: 'gpt-5-nano',
+    fallback_provider_id: 'ollama'
+  }
 };
-
-const STAGE_DISPLAY_ORDER = [
-  'RESOURCES',
-  'DEPENDENCIES',
-  'PROJECT_SETUP',
-  'CODE',
-  'TESTS',
-  'QUALITY'
-];
 
 const elements = {
-  directionButtons: document.querySelectorAll('.direction-button'),
-  dropzone: document.getElementById('dropzone'),
-  folderInput: document.getElementById('folder-input'),
-  selectedPath: document.getElementById('selected-path'),
-  rescanButton: document.getElementById('btn-rescan'),
-  detectionResults: document.getElementById('detection-results'),
-  detectionSummary: document.getElementById('detection-summary'),
-  modelProviderSelect: document.getElementById('model-provider'),
-  targetFrameworkSelect: document.getElementById('target-framework'),
-  languageOutputSelect: document.getElementById('language-output'),
-  modelIdentifierInput: document.getElementById('model-identifier'),
-  apiKeyInput: document.getElementById('api-key'),
-  startButton: document.getElementById('btn-start'),
-  backendStatus: document.getElementById('backend-status'),
-  resourceStatus: document.getElementById('resource-status'),
-  progressLog: document.getElementById('progress-log'),
-  progressSummary: document.getElementById('progress-summary'),
-  progressTime: document.getElementById('progress-time'),
-  analysisReport: document.getElementById('analysis-report'),
-  progressStats: document.getElementById('progress-stats'),
-  pauseButton: document.getElementById('btn-pause'),
-  resumeButton: document.getElementById('btn-resume'),
-  codeStyle: document.getElementById('code-style'),
-  commentStyle: document.getElementById('comment-style'),
-  namingStyle: document.getElementById('naming-style'),
-  errorStyle: document.getElementById('error-style'),
-  maxCpu: document.getElementById('max-cpu'),
-  maxRam: document.getElementById('max-ram'),
-  threads: document.getElementById('threads'),
-  apiRate: document.getElementById('api-rate'),
-  aiTemp: document.getElementById('ai-temp'),
-  aiStrategy: document.getElementById('ai-strategy'),
-  aiRetries: document.getElementById('ai-retries'),
-  templateName: document.getElementById('template-name'),
-  saveTemplateButton: document.getElementById('btn-save-template'),
-  loadTemplateButton: document.getElementById('btn-load-template'),
-  webhooksInput: document.getElementById('webhooks'),
-  debugToggle: document.getElementById('debug-toggle'),
-  viewLogsButton: document.getElementById('btn-view-logs'),
-  logsPanel: document.getElementById('logs-panel'),
-  reportLinks: document.getElementById('report-links'),
-  backupEnabled: document.getElementById('backup-enabled'),
-  backupProvider: document.getElementById('backup-provider'),
-  backupCredential: document.getElementById('backup-credential'),
-  backupConnectButton: document.getElementById('btn-backup-connect'),
-  backupRefreshButton: document.getElementById('btn-backup-refresh'),
-  backupRemotePath: document.getElementById('backup-remote-path'),
-  backupRetention: document.getElementById('backup-retention'),
-  backupAdvanced: document.getElementById('backup-advanced-fields'),
-  backupCredentialLabel: document.getElementById('backup-credential-label'),
-  backupClientId: document.getElementById('backup-client-id'),
-  backupClientSecret: document.getElementById('backup-client-secret'),
-  backupScopes: document.getElementById('backup-scopes'),
-  backupRootFolder: document.getElementById('backup-root-folder'),
-  backupTenant: document.getElementById('backup-tenant'),
-  backupLocalPath: document.getElementById('backup-local-path'),
-  backupSaveLocalButton: document.getElementById('btn-backup-save-local')
+  tabButtons: $$('.tab-button'),
+  tabContents: $$('.tab-content'),
+  backendStatus: $('#backend-status'),
+  resourceStatus: $('#resource-status'),
+  offlineIndicator: $('#session-offline-indicator'),
+  directionButtons: $$('.direction-button'),
+  dropzone: $('#dropzone'),
+  folderInput: $('#folder-input'),
+  selectedPath: $('#selected-path'),
+  btnRescan: $('#btn-rescan'),
+  btnPreview: $('#btn-preview'),
+  btnStart: $('#btn-start'),
+  btnResumeFailed: $('#btn-resume-failed'),
+  btnPause: $('#btn-pause'),
+  btnResume: $('#btn-resume'),
+  btnViewLogs: $('#btn-view-logs'),
+  btnRefreshLogs: $('#btn-refresh-logs'),
+  btnApplyFix: $('#btn-apply-fix'),
+  btnSaveTemplate: $('#btn-save-template'),
+  btnLoadTemplate: $('#btn-load-template'),
+  btnShareTemplate: $('#btn-share-template'),
+  btnAddWebhook: $('#btn-add-webhook'),
+  btnBatchAdd: $('#btn-batch-add'),
+  btnBatchClear: $('#btn-batch-clear'),
+  btnBatchStart: $('#btn-batch-start'),
+  btnRefreshCommunity: $('#btn-refresh-community'),
+  btnSubmitIssue: $('#btn-submit-issue'),
+  modelProvider: $('#model-provider'),
+  modelIdentifier: $('#model-identifier'),
+  apiKey: $('#api-key'),
+  targetFramework: $('#target-framework'),
+  languageOutput: $('#language-output'),
+  debugToggle: $('#debug-toggle'),
+  detectionSummary: $('#detection-summary'),
+  detectionResults: $('#detection-results'),
+  previewSummary: $('#preview-summary'),
+  previewCards: $('#preview-cards'),
+  progressStats: $('#progress-stats'),
+  progressTime: $('#progress-time'),
+  progressLog: $('#progress-log'),
+  stageProgress: $('#stage-progress'),
+  qualityScorePill: $('#quality-score-pill'),
+  manualFixList: $('#manual-fix-list'),
+  manualFixCount: $('#manual-fix-count'),
+  manualFixNote: $('#manual-fix-note'),
+  manualFixCode: $('#manual-fix-code'),
+  manualFixAuthor: $('#manual-fix-author'),
+  vulnerabilityList: $('#vulnerability-list'),
+  vulnerabilityCount: $('#vulnerability-count'),
+  costSummary: $('#cost-summary'),
+  costBudgetPill: $('#cost-budget-pill'),
+  buildConsole: $('#build-console'),
+  webhookRows: $('#webhook-rows'),
+  templateList: $('#template-list'),
+  batchQueue: $('#batch-queue'),
+  batchStatus: $('#batch-status'),
+  batchProjectPath: $('#batch-project-path'),
+  batchTargetPath: $('#batch-target-path'),
+  batchDirection: $('#batch-direction'),
+  communityMetrics: $('#community-metrics'),
+  communityLeaderboard: $('#community-leaderboard'),
+  issueSession: $('#issue-session-id'),
+  issueEmail: $('#issue-email'),
+  issueDescription: $('#issue-description'),
+  issueIncludeLogs: $('#issue-include-logs'),
+  issueResponse: $('#issue-response'),
+  templateName: $('#template-name'),
+  templateDescription: $('#template-description'),
+  templateOwner: $('#template-owner'),
+  templateTags: $('#template-tags'),
+  costEnabled: $('#cost-enabled'),
+  costMax: $('#cost-max'),
+  costWarn: $('#cost-warn'),
+  costAutoSwitch: $('#cost-auto-switch'),
+  costFallbackModel: $('#cost-fallback-model'),
+  costFallbackProvider: $('#cost-fallback-provider'),
+  aiTemp: $('#ai-temp'),
+  aiStrategy: $('#ai-strategy'),
+  aiRetries: $('#ai-retries'),
+  aiOffline: $('#ai-offline'),
+  aiPromptTone: $('#ai-prompt-tone'),
+  aiFallbackModel: $('#ai-fallback-model'),
+  aiFallbackProvider: $('#ai-fallback-provider'),
+  aiSmartPrompts: $('#ai-smart-prompts'),
+  codeStyle: $('#code-style'),
+  commentStyle: $('#comment-style'),
+  namingStyle: $('#naming-style'),
+  errorStyle: $('#error-style'),
+  cleanupUnused: $('#cleanup-unused'),
+  cleanupAutodelete: $('#cleanup-autodelete'),
+  cleanupMinBytes: $('#cleanup-min-bytes'),
+  qualityThreshold: $('#quality-threshold'),
+  enableLearning: $('#enable-learning'),
+  learningTrigger: $('#learning-trigger'),
+  maxCpu: $('#max-cpu'),
+  maxRam: $('#max-ram'),
+  threads: $('#threads'),
+  apiRate: $('#api-rate'),
+  parallelConversions: $('#parallel-conversions'),
+  buildTimeout: $('#build-timeout'),
+  preferOffline: $('#prefer-offline'),
+  backupEnabled: $('#backup-enabled'),
+  backupProvider: $('#backup-provider'),
+  backupCredential: $('#backup-credential'),
+  backupRemotePath: $('#backup-remote-path'),
+  backupRetention: $('#backup-retention'),
+  backupCredentialLabel: $('#backup-credential-label'),
+  backupClientId: $('#backup-client-id'),
+  backupClientSecret: $('#backup-client-secret'),
+  backupScopes: $('#backup-scopes'),
+  backupRootFolder: $('#backup-root-folder'),
+  backupTenant: $('#backup-tenant'),
+  backupLocalPath: $('#backup-local-path'),
+  btnBackupConnect: $('#btn-backup-connect'),
+  btnBackupRefresh: $('#btn-backup-refresh'),
+  btnBackupSaveLocal: $('#btn-backup-save-local'),
+  buildConsolePre: $('#build-console'),
+  communityMetricsPanel: $('#community-metrics'),
+  progressSummary: $('#progress-summary')
 };
 
-const formatPercent = (value) => `${Math.round(value * 100)}%`;
+function initTabs() {
+  elements.tabButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const tabId = button.dataset.tab;
+      elements.tabButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
+      elements.tabContents.forEach((content) => {
+        content.classList.toggle('active', content.id === `tab-${tabId}`);
+      });
+    });
+  });
+}
 
-const formatOverallPercent = (value) => `${Math.round((value || 0) * 100)}%`;
-
-const formatDuration = (seconds) => {
-  if (!seconds && seconds !== 0) return '–';
-  const totalSeconds = Math.max(0, Math.round(seconds));
-  const minutes = Math.floor(totalSeconds / 60);
-  const secs = totalSeconds % 60;
-  const hours = Math.floor(minutes / 60);
-  const minsDisplay = minutes % 60;
-  if (hours > 0) {
-    return `${hours}h ${minsDisplay}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${secs}s`;
-  }
-  return `${secs}s`;
-};
-
-const setDirection = (direction) => {
+function setDirection(direction) {
   state.direction = direction;
   elements.directionButtons.forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.direction === direction);
   });
   hydrateTargetFrameworks();
-};
+}
 
-const hydrateTargetFrameworks = () => {
+function hydrateTargetFrameworks() {
   const frameworks =
     state.direction === 'mac-to-win'
       ? [
@@ -124,895 +181,905 @@ const hydrateTargetFrameworks = () => {
           { value: 'appkit', label: 'AppKit (macOS 11+)' },
           { value: 'catalyst', label: 'Mac Catalyst (shared iOS/macOS)' }
         ];
-
-  elements.targetFrameworkSelect.innerHTML = '';
+  elements.targetFramework.innerHTML = '';
   frameworks.forEach((framework) => {
     const option = document.createElement('option');
     option.value = framework.value;
     option.textContent = framework.label;
-    elements.targetFrameworkSelect.appendChild(option);
+    elements.targetFramework.appendChild(option);
   });
-};
+}
 
-const updateBackendStatus = async () => {
-  const status = await window.macWinBridge.getBackendHealth();
-  if (status.status === 'ok') {
-    elements.backendStatus.textContent = `Backend: ${status.status}`;
-    elements.backendStatus.className = 'status-pill status-pill--ok';
-  } else {
-    elements.backendStatus.textContent = `Backend: ${status.status ?? 'down'}`;
-    elements.backendStatus.className = 'status-pill status-pill--error';
-  }
-};
-
-const updateResourceStatus = async () => {
-  const snapshot = await window.macWinBridge.getResourceSnapshot();
-  if (snapshot.error) {
-    elements.resourceStatus.textContent = 'Resources: unavailable';
-    elements.resourceStatus.className = 'status-pill status-pill--warn';
-    return;
-  }
-
-  const cpu = snapshot.cpu?.percent != null ? `${snapshot.cpu.percent}% CPU` : 'CPU n/a';
-  const memory =
-    snapshot.memory?.percent != null ? `${snapshot.memory.percent}% RAM` : 'RAM n/a';
-  const disk =
-    snapshot.disk?.free_gb != null
-      ? `${snapshot.disk.free_gb.toFixed(1)} GB free`
-      : 'Disk n/a';
-
-  elements.resourceStatus.textContent = `Resources: ${cpu}, ${memory}, ${disk}`;
-  elements.resourceStatus.className = 'status-pill status-pill--ok';
-};
-
-const renderDetectionResults = (result) => {
-  if (!result || result.error) {
-    elements.detectionResults.innerHTML =
-      '<div class="placeholder">Detection failed. Check logs for details.</div>';
-    elements.detectionSummary.textContent = 'Error';
-    elements.detectionSummary.className = 'summary-pill warn';
-    return;
-  }
-
-  elements.detectionSummary.textContent = 'Scan Complete';
-  elements.detectionSummary.className = 'summary-pill success';
-
-  const languages = result.languages?.map((lang) => {
-    const percentage =
-      result.summary?.total_files > 0
-        ? Math.round((lang.files / result.summary.total_files) * 100)
-        : 0;
-    return `<li>${lang.name} • ${lang.files} files • ${lang.lines} lines • ${percentage}%</li>`;
-  });
-
-  const frameworks = [
-    ...(result.frameworks?.mac ?? []).map((item) => `${item.name} (${item.version ?? '?'})`),
-    ...(result.frameworks?.windows ?? []).map(
-      (item) => `${item.name} (${item.version ?? '?'})`
-    )
-  ];
-
-  const dependencies = result.dependencies?.map((dep) => {
-    const version = dep.version ? `@${dep.version}` : '';
-    return `<li>${dep.name}${version} (${dep.manager})</li>`;
-  });
-
-  const infoCards = [
-    {
-      title: 'Languages',
-      content: languages?.length
-        ? `<ul>${languages.join('')}</ul>`
-        : '<div class="muted">None detected</div>'
-    },
-    {
-      title: 'Frameworks',
-      content: frameworks.length
-        ? `<ul>${frameworks.map((item) => `<li>${item}</li>`).join('')}</ul>`
-        : '<div class="muted">None detected</div>'
-    },
-    {
-      title: 'Dependencies',
-      content: dependencies?.length
-        ? `<ul>${dependencies.join('')}</ul>`
-        : '<div class="muted">No external dependencies</div>'
-    },
-    {
-      title: 'Project Size',
-      content: `
-        <div class="stat">${result.summary?.total_files ?? 0} files</div>
-        <div class="muted">${result.summary?.total_lines ?? 0} lines</div>
-        <div class="muted">Estimated time ${result.summary?.estimated_minutes ?? '–'} min</div>
-      `
-    }
-  ];
-
-  elements.detectionResults.innerHTML = `
-    <div class="result-grid">
-      ${infoCards
-        .map(
-          (card) => `
-            <div class="result-card">
-              <h3>${card.title}</h3>
-              ${card.content}
-            </div>
-          `
-        )
-        .join('')}
-    </div>
-  `;
-};
-
-const renderAnalysisReport = (result) => {
-  if (!result || result.error) {
-    elements.analysisReport.innerHTML =
-      '<div class="placeholder">No analysis available.</div>';
-    return;
-  }
-  const metrics = result.analysis;
-  elements.analysisReport.innerHTML = `
-    <div class="analysis-metrics">
-      <div class="analysis-metric">
-        <h4>Auto-convertible</h4>
-        <span>${formatPercent(metrics.auto_convertible)}</span>
-      </div>
-      <div class="analysis-metric">
-        <h4>Manual Review</h4>
-        <span>${formatPercent(metrics.manual_review)}</span>
-      </div>
-      <div class="analysis-metric">
-        <h4>Unsupported</h4>
-        <span>${formatPercent(metrics.unsupported)}</span>
-      </div>
-      <div class="analysis-metric">
-        <h4>Risk Level</h4>
-        <span>${metrics.risk_level}</span>
-      </div>
-      <div class="analysis-metric">
-        <h4>Est. Duration</h4>
-        <span>${metrics.time_estimate_minutes} min</span>
-      </div>
-      <div class="analysis-metric">
-        <h4>Tokens / Cost</h4>
-        <span>${metrics.estimated_tokens} tokens • $${metrics.estimated_cost_usd}</span>
-      </div>
-    </div>
-  `;
-};
-
-const resetProgressLog = () => {
-  elements.progressLog.innerHTML =
-    '<div class="placeholder">Conversion progress will stream here with per-file status updates.</div>';
-  elements.progressSummary.textContent = 'Idle';
-  elements.progressTime.textContent = '–';
-  elements.progressStats.innerHTML = '';
-};
-
-const populateModelProviders = (payload) => {
-  elements.modelProviderSelect.innerHTML = '';
-  state.providerMap.clear();
-  if (!payload?.providers?.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = 'No providers available';
-    elements.modelProviderSelect.appendChild(option);
-    return;
-  }
-  payload.providers.forEach((provider) => {
-    state.providerMap.set(provider.id, provider);
-    const option = document.createElement('option');
-    option.value = provider.id;
-    option.textContent = provider.label;
-    elements.modelProviderSelect.appendChild(option);
-  });
-  elements.modelProviderSelect.dispatchEvent(new Event('change'));
-};
-
-const triggerDetection = async () => {
-  if (!state.projectPath) {
-    return;
-  }
-  elements.detectionSummary.textContent = 'Scanning…';
-  elements.detectionSummary.className = 'summary-pill running';
-  elements.progressSummary.textContent = 'Analyzing project…';
-  elements.progressTime.textContent = new Date().toLocaleTimeString();
-
-  const response = await window.macWinBridge.detectProject(state.projectPath, {
-    direction: state.direction
-  });
-  if (response.error) {
-    renderDetectionResults(response);
-    renderAnalysisReport(response);
-    return;
-  }
-
-  state.detection = response;
-  renderDetectionResults(response);
-  renderAnalysisReport(response);
-  hydrateSuggestedTargets(response);
-  elements.startButton.disabled = false;
-};
-
-const hydrateSuggestedTargets = (result) => {
-  if (!result?.suggested_targets?.length) {
-    hydrateTargetFrameworks();
-    return;
-  }
-  elements.targetFrameworkSelect.innerHTML = '';
-  result.suggested_targets.forEach((target) => {
-    const option = document.createElement('option');
-    option.value = target.id;
-    option.textContent = target.label;
-    elements.targetFrameworkSelect.appendChild(option);
-  });
-};
-
-const initDragDrop = () => {
-  elements.dropzone.addEventListener('click', () => elements.folderInput.click());
-
-  elements.folderInput.addEventListener('change', (event) => {
-    const folder = event.target?.files?.[0];
-    if (folder?.path) {
-      state.projectPath = folder.path;
-      elements.selectedPath.textContent = folder.path;
-      elements.rescanButton.disabled = false;
-      triggerDetection();
-    }
-  });
-
-  elements.dropzone.addEventListener('dragover', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    elements.dropzone.classList.add('dragover');
-  });
-
-  elements.dropzone.addEventListener('dragleave', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    elements.dropzone.classList.remove('dragover');
-  });
-
-  elements.dropzone.addEventListener('drop', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    elements.dropzone.classList.remove('dragover');
-
-    const item = event.dataTransfer?.files?.[0];
-    if (item?.path) {
-      state.projectPath = item.path;
-      elements.selectedPath.textContent = item.path;
-      elements.rescanButton.disabled = false;
-      resetConversionState();
-      triggerDetection();
-    }
-  });
-};
-
-const initDirectionButtons = () => {
-  elements.directionButtons.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const direction = btn.dataset.direction;
-      setDirection(direction);
-      if (state.projectPath) {
-        triggerDetection();
-      }
-    });
+function initDirectionButtons() {
+  elements.directionButtons.forEach((button) => {
+    button.addEventListener('click', () => setDirection(button.dataset.direction));
   });
   setDirection(state.direction);
-};
+}
 
-const initRescanButton = () => {
-  elements.rescanButton.addEventListener('click', () => {
-    triggerDetection();
+function initDropzone() {
+  elements.dropzone.addEventListener('click', () => elements.folderInput.click());
+  ['dragenter', 'dragover'].forEach((eventName) => {
+    elements.dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      elements.dropzone.classList.add('dragover');
+    });
   });
-};
+  ['dragleave', 'drop'].forEach((eventName) => {
+    elements.dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      elements.dropzone.classList.remove('dragover');
+    });
+  });
+  elements.dropzone.addEventListener('drop', (event) => {
+    const { files } = event.dataTransfer;
+    if (!files || files.length === 0) return;
+    const path = files[0].path;
+    handleProjectSelected(path);
+  });
+  elements.folderInput.addEventListener('change', (event) => {
+    const { files } = event.target;
+    if (!files || files.length === 0) return;
+    handleProjectSelected(files[0].webkitRelativePath.split('/')[0] ? files[0].path.split(files[0].webkitRelativePath)[0] : files[0].path);
+  });
+}
 
-const initModelProviderSelect = () => {
-  elements.modelProviderSelect.addEventListener('change', () => {
-    const provider = state.providerMap.get(elements.modelProviderSelect.value);
-    if (provider?.default_identifier) {
-      elements.modelIdentifierInput.value = provider.default_identifier;
-    }
-    if (provider?.requires_api_key) {
-      elements.apiKeyInput.placeholder = 'API key required';
+function handleProjectSelected(projectPath) {
+  if (!projectPath) return;
+  state.projectPath = projectPath;
+  elements.selectedPath.textContent = projectPath;
+  elements.btnRescan.disabled = false;
+  elements.btnPreview.disabled = false;
+  elements.btnStart.disabled = false;
+  detectProject();
+}
+
+async function detectProject() {
+  if (!state.projectPath) return;
+  elements.detectionSummary.textContent = 'Scanning…';
+  elements.detectionSummary.className = 'summary-pill summary-pill--muted';
+  try {
+    const result = await window.macWinBridge.detectProject(state.projectPath, { direction: state.direction });
+    state.detection = result;
+    renderDetection(result);
+    elements.detectionSummary.textContent = 'Scan Complete';
+    elements.detectionSummary.className = 'summary-pill status-pill--ok';
+  } catch (error) {
+    elements.detectionSummary.textContent = 'Scan Failed';
+    elements.detectionSummary.className = 'summary-pill status-pill--error';
+    elements.detectionResults.innerHTML = `<div class="placeholder">${error?.message || 'Detection failed.'}</div>`;
+  }
+}
+
+function renderDetection(result) {
+  if (!result || result.error) {
+    elements.detectionResults.innerHTML = '<div class="placeholder">Detection failed. Check logs for details.</div>';
+    return;
+  }
+  const languages = (result.languages || [])
+    .map((lang) => `<div><strong>${lang.name}</strong> • ${lang.files} files • ${lang.lines} lines</div>`)
+    .join('');
+  const frameworks = [...(result.frameworks?.mac || []), ...(result.frameworks?.windows || [])]
+    .map((item) => `<span class="chip">${item.name} ${item.version ? `(${item.version})` : ''}</span>`)
+    .join('');
+  const dependencies = (result.dependencies || [])
+    .map((dep) => `<li>${dep.name}${dep.version ? `@${dep.version}` : ''} (${dep.manager})</li>`)
+    .join('');
+  elements.detectionResults.innerHTML = `
+    <div class="detection-grid">
+      <div>
+        <h3>Languages</h3>
+        <div class="detection-list">${languages || '<span class="muted">n/a</span>'}</div>
+      </div>
+      <div>
+        <h3>Frameworks</h3>
+        <div class="chip-row">${frameworks || '<span class="muted">n/a</span>'}</div>
+      </div>
+      <div>
+        <h3>Dependencies</h3>
+        <ul>${dependencies || '<span class="muted">n/a</span>'}</ul>
+      </div>
+    </div>
+  `;
+}
+
+async function updateBackendHealth() {
+  try {
+    const status = await window.macWinBridge.getBackendHealth();
+    if (status.status === 'ok') {
+      elements.backendStatus.textContent = 'Backend: ok';
+      elements.backendStatus.className = 'status-pill status-pill--ok';
     } else {
-      elements.apiKeyInput.placeholder = 'API key optional';
+      elements.backendStatus.textContent = 'Backend: down';
+      elements.backendStatus.className = 'status-pill status-pill--error';
     }
-  });
-};
+  } catch (error) {
+    elements.backendStatus.textContent = 'Backend: error';
+    elements.backendStatus.className = 'status-pill status-pill--error';
+  }
+}
 
-const boot = async () => {
-  initDirectionButtons();
-  initDragDrop();
-  initRescanButton();
-  initModelProviderSelect();
-  hydrateTargetFrameworks();
-  resetProgressLog();
+async function updateResourceSnapshot() {
+  try {
+    const snapshot = await window.macWinBridge.getResourceSnapshot();
+    if (snapshot.error) throw new Error(snapshot.error);
+    const cpu = snapshot.cpu?.percent != null ? `${snapshot.cpu.percent}% CPU` : 'CPU n/a';
+    const memory = snapshot.memory?.percent != null ? `${snapshot.memory.percent}% RAM` : 'RAM n/a';
+    const disk = snapshot.disk?.free_gb != null ? `${snapshot.disk.free_gb.toFixed(1)} GB free` : 'Disk n/a';
+    elements.resourceStatus.textContent = `Resources: ${cpu}, ${memory}, ${disk}`;
+    elements.resourceStatus.className = 'status-pill status-pill--ok';
+  } catch (error) {
+    elements.resourceStatus.textContent = 'Resources: unavailable';
+    elements.resourceStatus.className = 'status-pill status-pill--warn';
+  }
+}
 
-  elements.startButton.addEventListener('click', onStartConversion);
-  elements.pauseButton.addEventListener('click', onPauseConversion);
-  elements.resumeButton.addEventListener('click', onResumeConversion);
-  elements.saveTemplateButton.addEventListener('click', saveTemplate);
-  elements.loadTemplateButton.addEventListener('click', loadTemplate);
-  elements.viewLogsButton.addEventListener('click', viewLogs);
-  elements.debugToggle.addEventListener('change', onToggleDebug);
-  elements.backupEnabled.addEventListener('change', onBackupToggle);
-  elements.backupProvider.addEventListener('change', onBackupProviderChange);
-  elements.backupConnectButton.addEventListener('click', onBackupConnect);
-  elements.backupRefreshButton.addEventListener('click', loadBackupProviders);
-  elements.backupSaveLocalButton.addEventListener('click', onBackupSaveLocal);
-
-  await updateBackendStatus();
-  await updateResourceStatus();
-
-  const providerResponse = await window.macWinBridge.listModels();
-  populateModelProviders(providerResponse);
-  await refreshTemplates();
-  await loadBackupProviders();
-  setBackupUiEnabled(elements.backupEnabled.checked);
-
-  state.healthTimer = setInterval(updateBackendStatus, 15000);
-  state.resourceTimer = setInterval(updateResourceStatus, 10000);
-};
-
-const computeTargetPath = () => {
-  if (!state.projectPath) return null;
-  const separator = state.projectPath.includes('\\') ? '\\' : '/';
-  const idx = state.projectPath.lastIndexOf(separator);
-  const baseDir = idx > 0 ? state.projectPath.slice(0, idx) : state.projectPath;
-  const projectName = idx > 0 ? state.projectPath.slice(idx + 1) : state.projectPath;
-  const suffix = state.direction === 'mac-to-win' ? 'windows' : 'mac';
-  const targetName = `${projectName}.${suffix}.converted`;
-  const targetPath = idx > 0 ? `${baseDir}${separator}${targetName}` : `${targetName}`;
-  state.targetPath = targetPath;
-  return targetPath;
-};
-
-const collectConversionSettings = () => ({
-  code_style: elements.codeStyle.value,
-  comments: elements.commentStyle.value,
-  naming: elements.namingStyle.value,
-  error_handling: elements.errorStyle.value
-});
-
-const collectPerformanceSettings = () => ({
-  max_cpu: Number.parseInt(elements.maxCpu.value, 10) || 80,
-  max_ram_gb: Number.parseInt(elements.maxRam.value, 10) || 16,
-  threads: Number.parseInt(elements.threads.value, 10) || 4,
-  api_rate_limit: Number.parseInt(elements.apiRate.value, 10) || 30
-});
-
-const collectAISettings = () => ({
-  temperature: Number.parseFloat(elements.aiTemp.value) || 0.2,
-  strategy: elements.aiStrategy.value,
-  retries: Number.parseInt(elements.aiRetries.value, 10) || 3
-});
-
-const collectBackupSettings = () => {
-  const provider = elements.backupProvider.value || 'local';
-  const retention = Number.parseInt(elements.backupRetention.value, 10) || 10;
-  const remotePath = elements.backupRemotePath.value.trim() || '{project}/{direction}';
-  const credentialId = elements.backupCredential.value || null;
-  const enabled = elements.backupEnabled.checked;
+function gatherConversionSettings() {
   return {
-    enabled,
-    provider,
-    retention_count: retention,
-    remote_path: remotePath,
-    credential_id: credentialId || null
+    code_style: elements.codeStyle.value,
+    comments: elements.commentStyle.value,
+    naming: elements.namingStyle.value,
+    error_handling: elements.errorStyle.value,
+    cleanup_unused_assets: elements.cleanupUnused.checked,
+    cleanup_auto_delete: elements.cleanupAutodelete.checked,
+    cleanup_min_bytes: Number(elements.cleanupMinBytes.value || 0) * 1024,
+    preview_mode: false,
+    exclusions: [],
+    quality_score_threshold: Number(elements.qualityThreshold.value || 0.7),
+    enable_learning: elements.enableLearning.checked,
+    learning_trigger_count: Number(elements.learningTrigger.value || 3)
   };
-};
+}
 
-const collectWebhooks = () => {
-  const raw = elements.webhooksInput.value.trim();
-  if (!raw) return [];
-  return raw.split(',').map((item) => item.trim()).filter(Boolean);
-};
-
-const findBackupProvider = (providerId) => state.backupProviders.find((provider) => provider.id === providerId);
-
-const updateBackupCredentialOptions = () => {
-  const providerId = elements.backupProvider.value;
-  const providerInfo = findBackupProvider(providerId);
-  elements.backupCredential.innerHTML = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = providerInfo?.credentials?.length ? 'Select credential…' : 'No credentials connected';
-  elements.backupCredential.appendChild(placeholder);
-  (providerInfo?.credentials || []).forEach((credential) => {
-    const option = document.createElement('option');
-    option.value = credential.id;
-    const created = new Date(credential.created_at * 1000).toLocaleString();
-    option.textContent = `${credential.label} • ${created}`;
-    elements.backupCredential.appendChild(option);
-  });
-  elements.backupCredential.disabled = !elements.backupEnabled.checked || !(providerInfo?.credentials?.length);
-};
-
-const toggleBackupField = (selector, visible) => {
-  const field = elements.backupAdvanced.querySelector(selector);
-  if (field) {
-    field.classList.toggle('hidden', !visible);
-  }
-};
-
-const updateBackupAdvancedVisibility = () => {
-  const providerId = elements.backupProvider.value || 'local';
-  const providerInfo = findBackupProvider(providerId) || { requires_oauth: false };
-  const isOAuth = providerInfo.requires_oauth;
-  const isLocal = providerId === 'local';
-  toggleBackupField('.backup-label-field', true);
-  toggleBackupField('.backup-client-field', isOAuth);
-  toggleBackupField('.backup-secret-field', isOAuth);
-  toggleBackupField('.backup-scopes-field', isOAuth);
-  toggleBackupField('.backup-root-field', isOAuth || providerId === 'local' || providerId === 'dropbox' || providerId === 'google_drive' || providerId === 'one_drive');
-  toggleBackupField('.backup-tenant-field', providerId === 'one_drive');
-  toggleBackupField('.backup-local-field', isLocal);
-  elements.backupConnectButton.disabled = !elements.backupEnabled.checked || (!isOAuth && providerId !== 'local');
-  elements.backupSaveLocalButton.disabled = !(elements.backupEnabled.checked && isLocal);
-  updateBackupCredentialOptions();
-};
-
-const setBackupUiEnabled = (enabled) => {
-  elements.backupProvider.disabled = !enabled;
-  elements.backupRetention.disabled = !enabled;
-  elements.backupRemotePath.disabled = !enabled;
-  elements.backupCredential.disabled = !enabled;
-  elements.backupCredentialLabel.disabled = !enabled;
-  elements.backupClientId.disabled = !enabled;
-  elements.backupClientSecret.disabled = !enabled;
-  elements.backupScopes.disabled = !enabled;
-  elements.backupRootFolder.disabled = !enabled;
-  elements.backupTenant.disabled = !enabled;
-  elements.backupLocalPath.disabled = !enabled;
-  elements.backupConnectButton.disabled = !enabled;
-  elements.backupSaveLocalButton.disabled = !enabled;
-  if (enabled) {
-    updateBackupAdvancedVisibility();
-  }
-};
-
-const onBackupToggle = () => {
-  const enabled = elements.backupEnabled.checked;
-  setBackupUiEnabled(enabled);
-  if (!enabled) {
-    elements.backupCredential.value = '';
-  }
-};
-
-const populateBackupProviders = () => {
-  elements.backupProvider.innerHTML = '';
-  state.backupProviders.forEach((provider) => {
-    const option = document.createElement('option');
-    option.value = provider.id;
-    option.textContent = provider.name;
-    elements.backupProvider.appendChild(option);
-  });
-  if (!elements.backupProvider.value && state.backupProviders.length) {
-    const defaultProvider = state.backupProviders.find((item) => item.id === 'local') || state.backupProviders[0];
-    elements.backupProvider.value = defaultProvider.id;
-  }
-  updateBackupAdvancedVisibility();
-};
-
-const loadBackupProviders = async () => {
-  const response = await window.macWinBridge.listBackupProviders();
-  if (response?.providers) {
-    const previousProvider = elements.backupProvider.value;
-    const previousCredential = elements.backupCredential.value;
-    state.backupProviders = response.providers;
-    populateBackupProviders();
-    if (previousProvider && findBackupProvider(previousProvider)) {
-      elements.backupProvider.value = previousProvider;
-    }
-    updateBackupAdvancedVisibility();
-    if (previousCredential) {
-      elements.backupCredential.value = previousCredential;
-    }
-  }
-};
-
-const onBackupProviderChange = () => {
-  updateBackupAdvancedVisibility();
-};
-
-const onBackupConnect = async () => {
-  const providerId = elements.backupProvider.value;
-  const providerInfo = findBackupProvider(providerId);
-  if (!providerInfo) {
-    alert('Select a backup provider first.');
-    return;
-  }
-  if (!providerInfo.requires_oauth) {
-    alert('Selected provider does not require OAuth connection.');
-    return;
-  }
-  const clientId = elements.backupClientId.value.trim();
-  const clientSecret = elements.backupClientSecret.value.trim();
-  const label = elements.backupCredentialLabel.value.trim() || `${providerInfo.name} Credential`;
-  if (!clientId || !clientSecret) {
-    alert('Enter both client ID and client secret.');
-    return;
-  }
-  const scopesRaw = elements.backupScopes.value.trim();
-  const config = {
-    client_id: clientId,
-    client_secret: clientSecret,
-    label,
-    root_folder: elements.backupRootFolder.value.trim() || undefined,
-    tenant: providerId === 'one_drive' ? elements.backupTenant.value.trim() || 'common' : undefined,
-    scopes: scopesRaw ? scopesRaw.split(',').map((scope) => scope.trim()).filter(Boolean) : undefined
+function gatherPerformanceSettings() {
+  return {
+    max_cpu: Number(elements.maxCpu.value || 80),
+    max_ram_gb: Number(elements.maxRam.value || 16),
+    threads: Number(elements.threads.value || 4),
+    api_rate_limit: Number(elements.apiRate.value || 30),
+    parallel_conversions: Number(elements.parallelConversions.value || 1),
+    build_timeout_seconds: Number(elements.buildTimeout.value || 600),
+    prefer_offline: elements.preferOffline.checked
   };
-  const result = await window.macWinBridge.startBackupOAuth(providerId, config);
-  if (result?.error) {
-    alert(result.message || 'Unable to start authorization.');
-    return;
-  }
-  if (result?.auth_url) {
-    await window.macWinBridge.openExternal(result.auth_url);
-    alert('Authorization opened in your browser. Complete the flow and click Refresh once finished.');
-  }
-};
+}
 
-const onBackupSaveLocal = async () => {
-  const path = elements.backupLocalPath.value.trim();
-  if (!path) {
-    alert('Provide a local backup directory path.');
-    return;
-  }
-  const label = elements.backupCredentialLabel.value.trim() || 'Local Backup';
-  const response = await window.macWinBridge.createBackupCredential('local', {
-    label,
-    data: { base_path: path }
-  });
-  if (response?.error) {
-    alert(response.message || 'Failed to save local backup path.');
-    return;
-  }
-  await loadBackupProviders();
-};
-
-const updateReportLinks = (summary) => {
-  elements.reportLinks.innerHTML = '';
-  if (summary.conversion_report) {
-    const wrapper = document.createElement('div');
-    const button = document.createElement('button');
-    button.textContent = 'Open Conversion Report';
-    button.className = 'secondary-button link-button';
-    button.addEventListener('click', () => {
-      window.macWinBridge.openPath(summary.conversion_report);
-    });
-    wrapper.appendChild(button);
-    elements.reportLinks.appendChild(wrapper);
-  }
-  if (summary.quality_report?.ai_review_notes?.length) {
-    summary.quality_report.ai_review_notes.forEach((note) => {
-      const item = document.createElement('div');
-      item.textContent = `AI review: ${note}`;
-      elements.reportLinks.appendChild(item);
-    });
-  }
-  if (summary.diff_links?.length) {
-    summary.diff_links.forEach((href) => {
-      const item = document.createElement('div');
-      item.innerHTML = `<a href="${href}" target="_blank">Diff: ${href.split('/').pop()}</a>`;
-      elements.reportLinks.appendChild(item);
-    });
-  }
-  if (summary.backups?.length) {
-    summary.backups.slice(0, 3).forEach((backup) => {
-      const item = document.createElement('div');
-      const timestamp = new Date((backup.created_at || 0) * 1000).toLocaleString();
-      const provider = backup.provider || 'backup';
-      const link = backup.metadata?.remote?.remote_url || backup.remote_url;
-      if (link) {
-        item.innerHTML = `<a href="${link}" target="_blank">Backup (${provider}) • ${timestamp}</a>`;
-      } else {
-        item.textContent = `Backup (${provider}) • ${timestamp}`;
-      }
-      elements.reportLinks.appendChild(item);
-    });
-  }
-};
-
-const resetConversionState = () => {
-  stopStatusPolling();
-  state.sessionId = null;
-  state.targetPath = null;
-  elements.startButton.disabled = false;
-  elements.pauseButton.disabled = true;
-  elements.resumeButton.disabled = true;
-  resetProgressLog();
-  elements.reportLinks.innerHTML = '';
-  elements.logsPanel.textContent = '';
-};
-
-const onStartConversion = async () => {
-  if (!state.projectPath) {
-    alert('Select a project before starting conversion.');
-    return;
-  }
-  const providerId = elements.modelProviderSelect.value;
-  if (!providerId) {
-    alert('Pick an AI provider to continue.');
-    return;
-  }
-  const modelIdentifier = elements.modelIdentifierInput.value.trim();
-  if (!modelIdentifier) {
-    alert('Specify a model identifier or path.');
-    return;
-  }
-  const targetPath = computeTargetPath();
-  const conversionSettings = collectConversionSettings();
-  const performanceSettings = collectPerformanceSettings();
-  const aiSettings = collectAISettings();
-  const webhooks = collectWebhooks();
-  const backupSettings = collectBackupSettings();
-  if (backupSettings.enabled) {
-    const providerInfo = findBackupProvider(backupSettings.provider);
-    if (providerInfo?.requires_oauth && !backupSettings.credential_id) {
-      alert('Select a credential for the chosen backup provider.');
-      return;
-    }
-  }
-  const payload = {
-    project_path: state.projectPath,
-    target_path: targetPath,
-    direction: state.direction,
-    provider_id: providerId,
-    model_identifier: modelIdentifier,
-    api_key: elements.apiKeyInput.value.trim() || null,
-    conversion: conversionSettings,
-    performance: performanceSettings,
-    ai: aiSettings,
-    webhooks,
-    backup: backupSettings
+function gatherAISettings() {
+  return {
+    temperature: Number(elements.aiTemp.value || 0.2),
+    strategy: elements.aiStrategy.value,
+    retries: Number(elements.aiRetries.value || 3),
+    offline_only: elements.aiOffline.checked,
+    prompt_tone: elements.aiPromptTone.value,
+    fallback_model_identifier: elements.aiFallbackModel.value || null,
+    fallback_provider_id: elements.aiFallbackProvider.value || null,
+    smart_prompting: elements.aiSmartPrompts.checked
   };
+}
 
-  elements.startButton.disabled = true;
-  elements.pauseButton.disabled = true;
-  elements.resumeButton.disabled = true;
-  elements.progressSummary.textContent = 'Preparing…';
-  elements.progressTime.textContent = '–';
-
-  const response = await window.macWinBridge.startConversion(payload);
-  if (response.error || !response.session_id) {
-    elements.progressSummary.textContent = 'Failed to start';
-    elements.progressLog.innerHTML = `<div class="placeholder">${response.message || 'Backend rejected conversion start.'}</div>`;
-    elements.startButton.disabled = false;
-    return;
-  }
-
-  state.sessionId = response.session_id;
-  elements.pauseButton.disabled = false;
-  elements.resumeButton.disabled = true;
-  elements.progressLog.innerHTML = '<div class="placeholder">Conversion queued…</div>';
-  renderProgress(response.summary);
-  startStatusPolling();
-};
-
-const onPauseConversion = async () => {
-  if (!state.sessionId) return;
-  const response = await window.macWinBridge.pauseConversion(state.sessionId);
-  if (response.error) {
-    alert(response.message || 'Pause failed');
-    return;
-  }
-  renderProgress(response.summary);
-};
-
-const onResumeConversion = async () => {
-  if (!state.sessionId) return;
-  const response = await window.macWinBridge.resumeConversion(state.sessionId);
-  if (response.error) {
-    alert(response.message || 'Resume failed');
-    return;
-  }
-  renderProgress(response.summary);
-};
-
-const startStatusPolling = () => {
-  stopStatusPolling();
-  const poll = async () => {
-    if (!state.sessionId) return;
-    const response = await window.macWinBridge.getConversionStatus(state.sessionId);
-    if (response?.error) {
-      elements.progressSummary.textContent = 'Status unavailable';
-      elements.progressLog.innerHTML = `<div class="placeholder">${response.message}</div>`;
-      return;
-    }
-    renderProgress(response.summary);
+function gatherCostSettings() {
+  state.costSettings = {
+    enabled: elements.costEnabled.checked,
+    max_budget_usd: Number(elements.costMax.value || 0),
+    warn_percent: Number(elements.costWarn.value || 80) / 100,
+    auto_switch_model: elements.costAutoSwitch.checked,
+    fallback_model_identifier: elements.costFallbackModel.value || null,
+    fallback_provider_id: elements.costFallbackProvider.value || null
   };
-  poll();
-  state.progressTimer = setInterval(poll, 5000);
-};
+  return state.costSettings;
+}
 
-const stopStatusPolling = () => {
-  if (state.progressTimer) {
-    clearInterval(state.progressTimer);
-    state.progressTimer = null;
+function gatherBackupSettings() {
+  return {
+    enabled: elements.backupEnabled.checked,
+    provider: elements.backupProvider.value,
+    retention_count: Number(elements.backupRetention.value || 10),
+    remote_path: elements.backupRemotePath.value || '{project}/{direction}',
+    credential_id: elements.backupCredential.value || null
+  };
+}
+
+function gatherWebhooks() {
+  return state.webhooks
+    .filter((hook) => hook.url)
+    .map((hook) => ({
+      url: hook.url,
+      events: hook.events,
+      headers: hook.headers,
+      secret_token: hook.secret
+    }));
+}
+
+function ensureWebhooksInitialized() {
+  if (state.webhooks.length === 0) {
+    state.webhooks.push({ url: '', headers: {}, events: ['conversion.completed'], secret: '' });
   }
-};
+  renderWebhooks();
+}
 
-const renderProgress = (summary) => {
-  if (!summary) return;
-  const overallPct = formatOverallPercent(summary.overall_percentage);
-  const total = summary.total_files || 0;
-  const converted = summary.converted_files || 0;
-  elements.progressSummary.textContent = `${overallPct} (${converted}/${total} files)`;
-
-  const elapsed = formatDuration(summary.elapsed_seconds);
-  const remaining = summary.estimated_seconds_remaining != null
-    ? formatDuration(summary.estimated_seconds_remaining)
-    : 'estimating…';
-  elements.progressTime.textContent = `Elapsed ${elapsed} • ETA ${remaining}`;
-
-  const stageEntries = STAGE_DISPLAY_ORDER.map((stageName) => {
-    const data = summary.stage_progress?.[stageName];
-    if (!data) return '';
-    const completed = data.completed_units || 0;
-    const units = data.total_units || 0;
-    const stagePct = Math.round((data.percentage || 0) * 100);
-    let statusClass = 'pending';
-    if (data.status === 'running' || data.status === 'paused') {
-      statusClass = 'processing';
-    } else if (data.status === 'completed' || data.status === 'skipped') {
-      statusClass = 'done';
-    }
-    return `
-      <div class="progress-entry ${statusClass}">
-        <div>
-          <div class="status">${stageName.replace('_', ' ')}</div>
-          <div class="muted">${completed}/${units} • ${stagePct}%</div>
-        </div>
-        <span class="muted">${data.status}</span>
+function renderWebhooks() {
+  elements.webhookRows.removeEventListener('input', handleWebhookInput);
+  elements.webhookRows.removeEventListener('click', handleWebhookRemove);
+  elements.webhookRows.innerHTML = '';
+  state.webhooks.forEach((hook, index) => {
+    const row = document.createElement('div');
+    row.className = 'webhook-row';
+    row.innerHTML = `
+      <input type="text" placeholder="https://example.com/webhook" value="${hook.url || ''}" data-field="url" data-index="${index}" />
+      <input type="text" placeholder="Headers (key:value, one per line)" value="${serializeHeaders(hook.headers)}" data-field="headers" data-index="${index}" />
+      <input type="text" placeholder="Events (comma separated)" value="${(hook.events || []).join(', ')}" data-field="events" data-index="${index}" />
+      <div class="input-with-actions">
+        <input type="text" placeholder="Secret token" value="${hook.secret || ''}" data-field="secret" data-index="${index}" />
+        <button class="secondary-button secondary-button--danger" data-remove="${index}">×</button>
       </div>
     `;
-  }).filter(Boolean).join('');
+    elements.webhookRows.appendChild(row);
+  });
+  elements.webhookRows.addEventListener('input', handleWebhookInput);
+  elements.webhookRows.addEventListener('click', handleWebhookRemove);
+}
 
-  const current = summary.current_chunk;
-  const currentBlock = current
-    ? `<div class="progress-entry processing">
-        <div>
-          <div class="status">Current</div>
-          <div class="muted">${current.file_path.split(/[\\/]/).slice(-2).join('/')}</div>
-        </div>
-        <span class="muted">${current.stage}</span>
-      </div>`
-    : '';
-
-  elements.progressLog.innerHTML = `<div class="progress-log-list">${currentBlock}${stageEntries}</div>`;
-
-  const stats = [
-    `Tokens: ${summary.tokens_used || 0}`,
-    `Cost: $${(summary.cost_usd || 0).toFixed(4)}`,
-    `Session: ${state.sessionId || 'n/a'}`,
-    state.targetPath ? `Target: ${state.targetPath}` : null,
-    summary.conversion_report ? `Report: ${summary.conversion_report}` : null,
-    summary.manual_fixes_pending ? `Manual Fixes Pending: ${summary.manual_fixes_pending}` : null
-  ].filter(Boolean);
-  if (summary.test_results?.status) {
-    const failures = summary.test_results.failures ? summary.test_results.failures.length : 0;
-    stats.push(`Tests: ${summary.test_results.status.toUpperCase()} (${failures} failures)`);
+function handleWebhookInput(event) {
+  const target = event.target;
+  const index = Number(target.dataset.index);
+  if (Number.isNaN(index)) return;
+  const field = target.dataset.field;
+  if (!field) return;
+  const hook = state.webhooks[index];
+  if (!hook) return;
+  if (field === 'url') {
+    hook.url = target.value.trim();
+  } else if (field === 'headers') {
+    hook.headers = parseHeaders(target.value);
+  } else if (field === 'events') {
+    hook.events = target.value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  } else if (field === 'secret') {
+    hook.secret = target.value.trim();
   }
-  if (summary.benchmarks?.comparisons?.length) {
-    const regressions = summary.benchmarks.regressions ? summary.benchmarks.regressions.length : 0;
-    stats.push(`Benchmarks: ${summary.benchmarks.comparisons.length} checks • ${regressions} regressions`);
-  }
-  elements.progressStats.innerHTML = stats
-    .map((item) => `<span class="stat-item">${item}</span>`)
-    .join('');
+}
 
-  if (summary.quality_report) {
-    const issues = summary.quality_report.issues || [];
-    const qualityList = issues
-      .map((issue) => `<div class="stat-item">[${issue.severity}] ${issue.category}: ${issue.message}</div>`)
-      .join('');
-    if (qualityList) {
-      elements.progressStats.innerHTML += qualityList;
-    }
-  }
+function handleWebhookRemove(event) {
+  const button = event.target.closest('button[data-remove]');
+  if (!button) return;
+  const index = Number(button.dataset.remove);
+  state.webhooks.splice(index, 1);
+  ensureWebhooksInitialized();
+}
 
-  updateReportLinks(summary);
+function serializeHeaders(headers = {}) {
+  return Object.entries(headers)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n');
+}
 
-  if (summary.paused) {
-    elements.pauseButton.disabled = true;
-    elements.resumeButton.disabled = false;
+function parseHeaders(input) {
+  const lines = input.split(/\n|;/).map((line) => line.trim()).filter(Boolean);
+  const headers = {};
+  lines.forEach((line) => {
+    const [key, ...rest] = line.split(':');
+    if (!key || rest.length === 0) return;
+    headers[key.trim()] = rest.join(':').trim();
+  });
+  return headers;
+}
+
+function addWebhookRow() {
+  state.webhooks.push({ url: '', headers: {}, events: ['conversion.completed'], secret: '' });
+  renderWebhooks();
+}
+
+function renderManualFixes(summary) {
+  if (!summary) return;
+  const fixes = state.manualFixes;
+  elements.manualFixList.innerHTML = '';
+  if (!fixes || fixes.length === 0) {
+    elements.manualFixList.innerHTML = '<div class="placeholder">No manual fixes pending 🎉</div>';
   } else {
-    elements.pauseButton.disabled = false;
-    elements.resumeButton.disabled = true;
+    fixes.forEach((fix) => {
+      const item = document.createElement('div');
+      item.className = 'manual-fix-item';
+      item.dataset.chunkId = fix.chunk_id;
+      item.innerHTML = `
+        <strong>${fix.file_path}</strong>
+        <div class="muted">${fix.reason}</div>
+      `;
+      if (state.selectedManualFix && state.selectedManualFix.chunk_id === fix.chunk_id) {
+        item.classList.add('active');
+      }
+      elements.manualFixList.appendChild(item);
+    });
   }
+  elements.manualFixCount.textContent = `${fixes.length} pending`;
+}
 
-  if (summary.overall_percentage >= 1) {
-    elements.pauseButton.disabled = true;
-    elements.resumeButton.disabled = true;
-    stopStatusPolling();
+function handleManualFixSelection(event) {
+  const target = event.target.closest('.manual-fix-item');
+  if (!target) return;
+  const chunkId = target.dataset.chunkId;
+  const fix = state.manualFixes.find((entry) => entry.chunk_id === chunkId);
+  state.selectedManualFix = fix || null;
+  elements.manualFixCode.value = '';
+  elements.manualFixNote.value = fix?.notes?.join('\n') || '';
+  elements.manualFixAuthor.value = fix?.submitted_by || '';
+  elements.btnApplyFix.disabled = !fix;
+  renderManualFixes();
+}
+
+async function applyManualFix() {
+  if (!state.sessionId || !state.selectedManualFix) return;
+  const payload = {
+    code: elements.manualFixCode.value,
+    note: elements.manualFixNote.value,
+    submitted_by: elements.manualFixAuthor.value || undefined
+  };
+  try {
+    await window.macWinBridge.submitManualFix(state.sessionId, state.selectedManualFix.chunk_id, payload);
+    await refreshManualFixes();
+  } catch (error) {
+    console.error('Manual fix failed', error);
   }
-};
+}
 
-const refreshTemplates = async () => {
-  const response = await window.macWinBridge.listTemplates();
-  if (response?.templates) {
-    state.templates = response.templates;
-  }
-};
+async function refreshManualFixes() {
+  if (!state.sessionId) return;
+  const response = await window.macWinBridge.listManualFixes(state.sessionId);
+  state.manualFixes = response.manual_fixes || [];
+  renderManualFixes();
+}
 
-const saveTemplate = async () => {
-  const name = elements.templateName.value.trim();
-  if (!name) {
-    alert('Enter a template name.');
+function renderVulnerabilities(summary) {
+  const issues = summary?.quality_report?.issues || [];
+  const alerts = issues.filter((issue) => issue.severity && issue.severity.toLowerCase() !== 'info');
+  elements.vulnerabilityCount.textContent = alerts.length ? `${alerts.length} alerts` : 'No alerts';
+  if (alerts.length === 0) {
+    elements.vulnerabilityList.innerHTML = '<div class="placeholder">All clear! 🎉</div>';
     return;
   }
-  const payload = {
-    name,
-    conversion: collectConversionSettings(),
-    performance: collectPerformanceSettings(),
-    ai: collectAISettings()
+  elements.vulnerabilityList.innerHTML = alerts
+    .map(
+      (issue) => `
+        <div class="alert">
+          <strong>${issue.category}</strong><br />
+          ${issue.message}${issue.file_path ? ` • <span class="muted">${issue.file_path}</span>` : ''}
+        </div>
+      `
+    )
+    .join('');
+}
+
+function renderCost(summary) {
+  if (!summary || !summary.cost_settings) {
+    elements.costSummary.innerHTML = '<div class="placeholder">Budget tracking not enabled.</div>';
+    elements.costBudgetPill.textContent = 'Budget idle';
+    return;
+  }
+  const total = summary.cost_usd || 0;
+  const max = summary.cost_settings.max_budget_usd || 0;
+  const percent = summary.cost_percent_consumed != null ? summary.cost_percent_consumed : max ? total / max : 0;
+  const percentDisplay = Math.min(percent * 100, 999).toFixed(1);
+  elements.costBudgetPill.textContent = max ? `$${total.toFixed(2)} / $${max.toFixed(2)}` : `$${total.toFixed(2)} spent`;
+  elements.costBudgetPill.className = `summary-pill ${percent > 0.9 ? 'status-pill--warn' : 'status-pill--muted'}`;
+  const warnings = summary.warnings && summary.warnings.length ? summary.warnings.map((w) => `<li>${w}</li>`).join('') : '';
+  elements.costSummary.innerHTML = `
+    <div class="cost-details">
+      <div>Tokens used: ${summary.tokens_used || 0}</div>
+      <div>Budget used: ${percentDisplay}%</div>
+      <div class="cost-bar"><span style="width:${Math.min(percent, 1) * 100}%"></span></div>
+      ${warnings ? `<ul class="muted">${warnings}</ul>` : ''}
+    </div>
+  `;
+}
+
+function renderProgress(summary) {
+  if (!summary) return;
+  elements.qualityScorePill.textContent = summary.quality_score != null ? `Quality: ${(summary.quality_score * 100).toFixed(0)}%` : 'Quality: –';
+  elements.progressStats.textContent = `${summary.converted_files || 0} / ${summary.total_files || 0} files converted`;
+  elements.progressTime.textContent = `Elapsed: ${formatDuration(summary.elapsed_seconds)} • ETA: ${formatDuration(summary.estimated_seconds_remaining)}`;
+  if (summary.current_chunk) {
+    elements.progressLog.innerHTML = `<div><strong>${summary.current_chunk.file_path}</strong> • ${summary.current_chunk.summary || ''}</div>`;
+  }
+  renderStageProgress(summary);
+  renderVulnerabilities(summary);
+  renderCost(summary);
+  renderPreview(summary.preview_estimate);
+  updateOfflineIndicator(summary.offline_mode);
+}
+
+function renderStageProgress(summary) {
+  const stageEntries = Object.entries(summary.stage_progress || {});
+  if (!stageEntries.length) {
+    elements.stageProgress.innerHTML = '<div class="placeholder">No progress yet.</div>';
+    return;
+  }
+  elements.stageProgress.innerHTML = stageEntries
+    .map(([stage, progress]) => {
+      const pct = Math.min(progress.percentage || 0, 1) * 100;
+      return `
+        <div class="stage-row">
+          <div><strong>${stage}</strong></div>
+          <div>${progress.completed_units}/${progress.total_units}</div>
+          <div class="progress-meter"><span style="width:${pct}%"></span></div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function renderPreview(estimate) {
+  state.previewEstimate = estimate;
+  if (!estimate) {
+    elements.previewSummary.classList.add('hidden');
+    elements.previewCards.innerHTML = '';
+    return;
+  }
+  elements.previewSummary.classList.remove('hidden');
+  elements.previewCards.innerHTML = `
+    <div class="card">
+      <div class="muted">Estimated Cost</div>
+      <strong>$${(estimate.estimated_cost_usd || 0).toFixed(2)}</strong>
+    </div>
+    <div class="card">
+      <div class="muted">Estimated Time</div>
+      <strong>${formatDuration((estimate.estimated_minutes || 0) * 60)}</strong>
+    </div>
+    <div class="card">
+      <div class="muted">Impacted Files</div>
+      <strong>${estimate.impacted_files || 0}</strong>
+    </div>
+  `;
+}
+
+function formatDuration(seconds) {
+  if (seconds == null) return '–';
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  const hours = Math.floor(minutes / 60);
+  const minsDisplay = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${minsDisplay}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  }
+  return `${secs}s`;
+}
+
+function updateOfflineIndicator(offline) {
+  elements.offlineIndicator.textContent = offline ? 'Mode: Offline' : 'Mode: Online';
+  elements.offlineIndicator.className = `status-pill ${offline ? 'status-pill--warn' : 'status-pill--ok'}`;
+}
+
+function renderTemplates(templates) {
+  state.templates = templates || [];
+  if (!templates.length) {
+    elements.templateList.innerHTML = '<div class="placeholder">No templates saved yet.</div>';
+    return;
+  }
+  elements.templateList.innerHTML = templates
+    .map((tpl) => {
+      const tags = (tpl.tags || []).map((tag) => `<span class="chip">${tag}</span>`).join(' ');
+      return `
+        <div class="template-card">
+          <div class="template-card__header">
+            <strong>${tpl.name}</strong>
+            <span class="muted">${tpl.owner || 'local'}</span>
+          </div>
+          <p>${tpl.description || 'No description provided.'}</p>
+          <div class="chip-row">${tags}</div>
+          <div class="template-card__actions">
+            <button class="secondary-button" data-template-load="${tpl.name}">Load</button>
+            <button class="secondary-button secondary-button--danger" data-template-delete="${tpl.name}">Delete</button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function renderBatchQueue() {
+  if (!state.batchQueue.length) {
+    elements.batchQueue.innerHTML = '<div class="placeholder">Queue is empty. Add multiple projects to convert them sequentially.</div>';
+    elements.btnBatchStart.disabled = true;
+    return;
+  }
+  elements.batchQueue.innerHTML = state.batchQueue
+    .map((item, index) => `
+      <div class="batch-item">
+        <div><strong>${item.project_path}</strong> → ${item.target_path}</div>
+        <div class="muted">${item.direction}</div>
+        <button class="secondary-button secondary-button--danger" data-batch-remove="${index}">Remove</button>
+      </div>
+    `)
+    .join('');
+  elements.btnBatchStart.disabled = false;
+}
+
+function renderCommunityMetrics() {
+  const metrics = state.community;
+  if (!metrics) {
+    elements.communityMetrics.innerHTML = '<div class="placeholder">Refresh to load community stats.</div>';
+    elements.communityLeaderboard.innerHTML = '<div class="placeholder">No leaderboard data yet.</div>';
+    return;
+  }
+  const stats = metrics.stats || {};
+  const directions = stats.directions || {};
+  elements.communityMetrics.innerHTML = `
+    <div class="metric-card"><div class="muted">Total Sessions</div><strong>${stats.total_sessions || 0}</strong></div>
+    <div class="metric-card"><div class="muted">Completed</div><strong>${stats.completed_sessions || 0}</strong></div>
+    <div class="metric-card"><div class="muted">Avg Cost</div><strong>$${(stats.avg_cost_usd || 0).toFixed(2)}</strong></div>
+    <div class="metric-card"><div class="muted">Avg Quality</div><strong>${stats.avg_quality_score != null ? (stats.avg_quality_score * 100).toFixed(0) : '–'}%</strong></div>
+    <div class="metric-card"><div class="muted">Mac → Win</div><strong>${directions['mac-to-win'] || 0}</strong></div>
+    <div class="metric-card"><div class="muted">Win → Mac</div><strong>${directions['win-to-mac'] || 0}</strong></div>
+  `;
+  const leaderboard = stats.leaderboard || [];
+  if (!leaderboard.length) {
+    elements.communityLeaderboard.innerHTML = '<div class="placeholder">No leaderboard data yet.</div>';
+  } else {
+    elements.communityLeaderboard.innerHTML = leaderboard
+      .map((entry) => `
+        <div class="entry">
+          <span>${entry.session_id}</span>
+          <span>${(entry.score * 100).toFixed(0)}%</span>
+        </div>
+      `)
+      .join('');
+  }
+}
+
+async function previewConversion() {
+  if (!state.projectPath) return;
+  try {
+    const payload = {
+      project_path: state.projectPath,
+      direction: state.direction,
+      exclusions: []
+    };
+    const response = await window.macWinBridge.previewConversion(payload);
+    renderPreview(response.preview);
+  } catch (error) {
+    console.error('Preview failed', error);
+  }
+}
+
+function collectStartPayload() {
+  return {
+    project_path: state.projectPath,
+    target_path: state.projectPath && state.direction === 'mac-to-win' ? `${state.projectPath}-windows` : `${state.projectPath}-mac`,
+    direction: state.direction,
+    provider_id: elements.modelProvider.value || 'openai-compatible',
+    model_identifier: elements.modelIdentifier.value || 'gpt-5',
+    api_key: elements.apiKey.value || undefined,
+    conversion: gatherConversionSettings(),
+    performance: gatherPerformanceSettings(),
+    ai: gatherAISettings(),
+    cost: gatherCostSettings(),
+    webhooks: gatherWebhooks(),
+    incremental: false,
+    git: null,
+    backup: gatherBackupSettings()
   };
+}
+
+async function startConversion() {
+  if (!state.projectPath) return;
+  const payload = collectStartPayload();
+  payload.target_path = await promptForTargetPath(payload.target_path);
+  if (!payload.target_path) return;
+  const response = await window.macWinBridge.startConversion(payload);
+  if (response.error) {
+    console.error(response.message);
+    return;
+  }
+  state.sessionId = response.session_id;
+  state.manualFixes = [];
+  state.selectedManualFix = null;
+  elements.btnPause.disabled = false;
+  elements.btnResume.disabled = true;
+  elements.btnPreview.disabled = false;
+  elements.btnResumeFailed.disabled = false;
+  startProgressTimer();
+}
+
+async function resumeFailedConversion() {
+  if (!state.sessionId) return;
+  const payload = {
+    session_id: state.sessionId,
+    provider_id: elements.modelProvider.value || undefined,
+    model_identifier: elements.modelIdentifier.value || undefined,
+    api_key: elements.apiKey.value || undefined
+  };
+  const response = await window.macWinBridge.resumeFailedConversion(payload);
+  if (response.error) {
+    console.error(response.message);
+    return;
+  }
+  state.sessionId = response.session_id;
+  elements.btnResumeFailed.disabled = false;
+  startProgressTimer();
+}
+
+async function pauseConversion() {
+  if (!state.sessionId) return;
+  await window.macWinBridge.pauseConversion(state.sessionId);
+  elements.btnPause.disabled = true;
+  elements.btnResume.disabled = false;
+}
+
+async function resumeConversion() {
+  if (!state.sessionId) return;
+  await window.macWinBridge.resumeConversion(state.sessionId);
+  elements.btnPause.disabled = false;
+  elements.btnResume.disabled = true;
+}
+
+async function startProgressTimer() {
+  if (state.progressTimer) clearInterval(state.progressTimer);
+  await refreshSummary();
+  state.progressTimer = setInterval(refreshSummary, 4000);
+}
+
+async function refreshSummary() {
+  if (!state.sessionId) return;
+  const response = await window.macWinBridge.getConversionStatus(state.sessionId);
+  if (response.error) {
+    console.error(response.message);
+    return;
+  }
+  const summary = response.summary;
+  if (!summary) return;
+  renderProgress(summary);
+  await refreshManualFixes();
+  if (!summary.paused) {
+    elements.btnPause.disabled = false;
+    elements.btnResume.disabled = true;
+  }
+  if (summary.paused) {
+    elements.btnPause.disabled = true;
+    elements.btnResume.disabled = false;
+  }
+  if (summary.overall_percentage >= 1 && state.progressTimer) {
+    clearInterval(state.progressTimer);
+    state.progressTimer = null;
+    elements.btnPause.disabled = true;
+    elements.btnResume.disabled = true;
+  }
+}
+
+async function promptForTargetPath(defaultPath) {
+  return defaultPath;
+}
+
+async function refreshLogs() {
+  const response = await window.macWinBridge.fetchLogs(200);
+  if (response.error) return;
+  const entries = response.entries || [];
+  elements.buildConsole.textContent = entries.map((entry) => `${entry.timestamp || ''} ${entry.message}`).join('\n');
+}
+
+async function loadTemplates() {
+  const response = await window.macWinBridge.listTemplates();
+  if (response.error) return;
+  renderTemplates(response.templates || []);
+}
+
+async function loadModelProviders() {
+  try {
+    const response = await window.macWinBridge.listModels();
+    let providers = response.providers || [];
+    if (!Array.isArray(providers) && typeof providers === 'object') {
+      providers = Object.values(providers);
+    }
+    if (!providers.length) {
+      providers = [
+        { id: 'openai-compatible', display_name: 'OpenAI Compatible' },
+        { id: 'ollama', display_name: 'Ollama (local)' }
+      ];
+    }
+    elements.modelProvider.innerHTML = '';
+    providers.forEach((provider) => {
+      const option = document.createElement('option');
+      if (typeof provider === 'string') {
+        option.value = provider;
+        option.textContent = provider;
+      } else {
+        option.value = provider.id || provider.name;
+        option.textContent = provider.display_name || provider.name || provider.id;
+      }
+      elements.modelProvider.appendChild(option);
+    });
+  } catch (error) {
+    console.error('Failed to load providers', error);
+  }
+}
+
+async function saveTemplate() {
+  const payload = collectStartPayload();
+  payload.name = elements.templateName.value || 'default-template';
+  payload.description = elements.templateDescription.value || '';
+  payload.owner = elements.templateOwner.value || 'local';
+  payload.tags = elements.templateTags.value ? elements.templateTags.value.split(',').map((tag) => tag.trim()).filter(Boolean) : [];
   const response = await window.macWinBridge.saveTemplate(payload);
   if (response.error) {
-    alert(response.message || 'Failed to save template');
+    console.error(response.message);
     return;
   }
-  await refreshTemplates();
-  alert('Template saved');
-};
+  await loadTemplates();
+}
 
-const loadTemplate = async () => {
-  let name = elements.templateName.value.trim();
-  if (!name && state.templates.length) {
-    name = state.templates[0];
-  }
-  if (!name) {
-    alert('No template name provided.');
-    return;
-  }
+async function loadTemplateByName(name) {
   const response = await window.macWinBridge.loadTemplate(name);
-  if (response.error || !response.template) {
-    alert(response.message || 'Template not found');
+  if (response.error || !response.template) return;
+  const tpl = response.template;
+  elements.codeStyle.value = tpl.conversion.code_style;
+  elements.commentStyle.value = tpl.conversion.comments;
+  elements.namingStyle.value = tpl.conversion.naming;
+  elements.errorStyle.value = tpl.conversion.error_handling;
+  elements.maxCpu.value = tpl.performance.max_cpu;
+  elements.maxRam.value = tpl.performance.max_ram_gb;
+  elements.threads.value = tpl.performance.threads;
+  elements.apiRate.value = tpl.performance.api_rate_limit;
+  elements.aiTemp.value = tpl.ai.temperature;
+  elements.aiStrategy.value = tpl.ai.strategy;
+  elements.aiRetries.value = tpl.ai.retries;
+}
+
+async function shareTemplate() {
+  try {
+    const payload = {
+      name: elements.templateName.value,
+      description: elements.templateDescription.value,
+      owner: elements.templateOwner.value || 'community',
+      tags: elements.templateTags.value ? elements.templateTags.value.split(',').map((tag) => tag.trim()).filter(Boolean) : []
+    };
+    const response = await window.macWinBridge.shareTemplate(payload);
+    if (response.error) {
+      console.error(response.message);
+    }
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function deleteTemplate(name) {
+  const response = await window.macWinBridge.deleteTemplate(name);
+  if (response.error) {
+    console.error(response.message);
     return;
   }
-  const template = response.template;
-  applyTemplate(template);
-};
+  await loadTemplates();
+}
 
-const applyTemplate = (template) => {
-  const conversion = template.conversion || {};
-  const performance = template.performance || {};
-  const ai = template.ai || {};
-  if (conversion.code_style) elements.codeStyle.value = conversion.code_style;
-  if (conversion.comments) elements.commentStyle.value = conversion.comments;
-  if (conversion.naming) elements.namingStyle.value = conversion.naming;
-  if (conversion.error_handling) elements.errorStyle.value = conversion.error_handling;
-  if (performance.max_cpu) elements.maxCpu.value = performance.max_cpu;
-  if (performance.max_ram_gb) elements.maxRam.value = performance.max_ram_gb;
-  if (performance.threads) elements.threads.value = performance.threads;
-  if (performance.api_rate_limit) elements.apiRate.value = performance.api_rate_limit;
-  if (ai.temperature != null) elements.aiTemp.value = ai.temperature;
-  if (ai.strategy) elements.aiStrategy.value = ai.strategy;
-  if (ai.retries) elements.aiRetries.value = ai.retries;
-};
-
-const viewLogs = async () => {
-  const response = await window.macWinBridge.fetchLogs(200);
+async function loadCommunityMetrics() {
+  const response = await window.macWinBridge.getCommunityMetrics();
   if (response.error) {
-    elements.logsPanel.textContent = response.message || 'Failed to load logs';
+    console.error(response.message);
     return;
   }
-  const entries = response.entries || [];
-  elements.logsPanel.innerHTML = entries
-    .map((entry) => `<div>[${entry.timestamp}] ${entry.category}: ${entry.message}</div>`)
-    .join('');
-};
+  state.community = response;
+  renderCommunityMetrics();
+}
 
-const onToggleDebug = async (event) => {
-  const response = await window.macWinBridge.setDebugMode(event.target.checked);
+async function submitIssueReport() {
+  const payload = {
+    session_id: elements.issueSession.value || undefined,
+    email: elements.issueEmail.value || undefined,
+    description: elements.issueDescription.value,
+    include_logs: elements.issueIncludeLogs.checked
+  };
+  const response = await window.macWinBridge.submitIssueReport(payload);
   if (response.error) {
-    alert(response.message || 'Unable to update debug mode');
+    elements.issueResponse.textContent = response.message;
+  } else {
+    elements.issueResponse.textContent = `Report saved to ${response.report_path}`;
   }
-};
+}
 
-document.addEventListener('DOMContentLoaded', () => {
-  boot().catch((error) => {
-    console.error('Failed to start renderer', error);
+function addBatchItem() {
+  if (!elements.batchProjectPath.value || !elements.batchTargetPath.value) return;
+  state.batchQueue.push({
+    project_path: elements.batchProjectPath.value,
+    target_path: elements.batchTargetPath.value,
+    direction: elements.batchDirection.value
   });
-});
+  elements.batchProjectPath.value = '';
+  elements.batchTargetPath.value = '';
+  renderBatchQueue();
+}
+
+function clearBatchQueue() {
+  state.batchQueue = [];
+  renderBatchQueue();
+}
+
+async function startBatchConversion() {
+  if (!state.batchQueue.length) return;
+  const payload = collectStartPayload();
+  const batchPayload = {
+    projects: state.batchQueue,
+    provider_id: payload.provider_id,
+    model_identifier: payload.model_identifier,
+    api_key: payload.api_key,
+    conversion: payload.conversion,
+    performance: payload.performance,
+    ai: payload.ai,
+    cost: payload.cost,
+    incremental: payload.incremental,
+    backup: payload.backup
+  };
+  const response = await window.macWinBridge.startBatchConversion(batchPayload);
+  if (response.error) {
+    console.error(response.message);
+    return;
+  }
+  elements.batchStatus.textContent = `Scheduled sessions: ${response.scheduled_sessions.length}`;
+  clearBatchQueue();
+}
+
+function attachEventListeners() {
+  elements.btnRescan.addEventListener('click', detectProject);
+  elements.btnPreview.addEventListener('click', previewConversion);
+  elements.btnStart.addEventListener('click', startConversion);
+  elements.btnResumeFailed.addEventListener('click', resumeFailedConversion);
+  elements.btnPause.addEventListener('click', pauseConversion);
+  elements.btnResume.addEventListener('click', resumeConversion);
+  elements.btnViewLogs.addEventListener('click', refreshLogs);
+  elements.btnRefreshLogs.addEventListener('click', refreshLogs);
+  elements.btnApplyFix.addEventListener('click', applyManualFix);
+  elements.manualFixList.addEventListener('click', handleManualFixSelection);
+  elements.btnSaveTemplate.addEventListener('click', saveTemplate);
+  elements.btnLoadTemplate.addEventListener('click', () => {
+    const name = elements.templateName.value;
+    if (name) loadTemplateByName(name);
+  });
+  elements.templateList.addEventListener('click', (event) => {
+    const loadButton = event.target.closest('button[data-template-load]');
+    const deleteButton = event.target.closest('button[data-template-delete]');
+    if (loadButton) loadTemplateByName(loadButton.dataset.templateLoad);
+    if (deleteButton) deleteTemplate(deleteButton.dataset.templateDelete);
+  });
+  elements.btnShareTemplate.addEventListener('click', shareTemplate);
+  elements.btnAddWebhook.addEventListener('click', addWebhookRow);
+  elements.btnBatchAdd.addEventListener('click', addBatchItem);
+  elements.batchQueue.addEventListener('click', (event) => {
+    const removeButton = event.target.closest('button[data-batch-remove]');
+    if (!removeButton) return;
+    const index = Number(removeButton.dataset.batchRemove);
+    state.batchQueue.splice(index, 1);
+    renderBatchQueue();
+  });
+  elements.btnBatchClear.addEventListener('click', clearBatchQueue);
+  elements.btnBatchStart.addEventListener('click', startBatchConversion);
+  elements.btnRefreshCommunity.addEventListener('click', loadCommunityMetrics);
+  elements.btnSubmitIssue.addEventListener('click', submitIssueReport);
+}
+
+async function loadInitialData() {
+  await updateBackendHealth();
+  await updateResourceSnapshot();
+  await loadModelProviders();
+  await loadTemplates();
+  ensureWebhooksInitialized();
+}
+
+async function detectAndAutoPreview() {
+  if (state.projectPath) {
+    await detectProject();
+    await previewConversion();
+  }
+}
+
+function init() {
+  initTabs();
+  initDirectionButtons();
+  initDropzone();
+  attachEventListeners();
+  ensureWebhooksInitialized();
+  loadInitialData();
+  detectAndAutoPreview();
+  setInterval(updateResourceSnapshot, 10000);
+}
+
+document.addEventListener('DOMContentLoaded', init);

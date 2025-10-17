@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
@@ -21,7 +23,7 @@ from backend.conversion.mappings import (
   DependencyMapping,
   ApiMappingCatalog
 )
-from backend.conversion.models import ConversionSettings, PerformanceSettings, AISettings, GitSettings, BackupSettings
+from backend.conversion.models import ConversionSettings, PerformanceSettings, AISettings, GitSettings, BackupSettings, CostSettings
 from backend.config import settings
 from backend.detection.scanner import ProjectScanner, ScannerError
 from backend.resources.monitor import ResourceMonitor
@@ -92,6 +94,15 @@ class ConversionSettingsPayload(BaseModel):
   comments: str = Field(default='keep')
   naming: str = Field(default='preserve')
   error_handling: str = Field(default='adapt')
+  cleanup_unused_assets: bool = Field(default=True)
+  cleanup_auto_delete: bool = Field(default=False)
+  cleanup_min_bytes: int = Field(default=1048576, ge=0)
+  preview_mode: bool = Field(default=False)
+  exclusions: Optional[List[str]] = Field(default=None)
+  quality_score_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+  project_type: Optional[str] = Field(default=None)
+  enable_learning: bool = Field(default=True)
+  learning_trigger_count: int = Field(default=3, ge=1, le=10)
 
 
 class PerformanceSettingsPayload(BaseModel):
@@ -99,12 +110,36 @@ class PerformanceSettingsPayload(BaseModel):
   max_ram_gb: int = Field(default=16, ge=2, le=64)
   threads: int = Field(default=4, ge=1, le=16)
   api_rate_limit: int = Field(default=30, ge=5, le=120)
+  parallel_conversions: int = Field(default=1, ge=1, le=4)
+  build_timeout_seconds: int = Field(default=600, ge=60, le=3600)
+  prefer_offline: bool = Field(default=False)
 
 
 class AISettingsPayload(BaseModel):
   temperature: float = Field(default=0.2, ge=0.0, le=1.0)
   strategy: str = Field(default='balanced')
   retries: int = Field(default=3, ge=1, le=5)
+  offline_only: bool = Field(default=False)
+  prompt_tone: str = Field(default='pro')
+  fallback_model_identifier: Optional[str] = Field(default=None)
+  fallback_provider_id: Optional[str] = Field(default=None)
+  smart_prompting: bool = Field(default=True)
+
+
+class WebhookConfigPayload(BaseModel):
+  url: str
+  headers: Optional[Dict[str, str]] = None
+  events: Optional[List[str]] = None
+  secret_token: Optional[str] = None
+
+
+class CostSettingsPayload(BaseModel):
+  enabled: bool = Field(default=True)
+  max_budget_usd: float = Field(default=50.0, ge=0.0)
+  warn_percent: float = Field(default=0.8, ge=0.1, le=1.0)
+  auto_switch_model: bool = Field(default=True)
+  fallback_model_identifier: Optional[str] = Field(default=None)
+  fallback_provider_id: Optional[str] = Field(default=None)
 
 
 class GitSettingsPayload(BaseModel):
@@ -141,6 +176,9 @@ class TemplatePayload(BaseModel):
   conversion: ConversionSettingsPayload
   performance: PerformanceSettingsPayload
   ai: AISettingsPayload
+  description: Optional[str] = Field(default='')
+  owner: Optional[str] = Field(default='local')
+  tags: Optional[List[str]] = Field(default=None)
 
 
 class BatchConversionItem(BaseModel):
@@ -160,6 +198,7 @@ class BatchConversionPayload(BaseModel):
   git: Optional[GitSettingsPayload] = None
   incremental: Optional[bool] = None
   backup: Optional[BackupSettingsPayload] = None
+  cost: Optional[CostSettingsPayload] = None
 
 
 class DebugTogglePayload(BaseModel):
@@ -177,6 +216,34 @@ class ManualFixSubmissionPayload(BaseModel):
   submitted_by: Optional[str] = None
 
 
+class PreviewPayload(BaseModel):
+  project_path: str
+  direction: str
+  exclusions: Optional[List[str]] = None
+  model_identifier: Optional[str] = None
+
+
+class ResumeFailedPayload(BaseModel):
+  session_id: str
+  provider_id: Optional[str] = None
+  model_identifier: Optional[str] = None
+  api_key: Optional[str] = None
+
+
+class TemplateSharePayload(BaseModel):
+  name: str
+  description: Optional[str] = Field(default='')
+  owner: Optional[str] = Field(default='community')
+  tags: Optional[List[str]] = Field(default=None)
+
+
+class IssueReportPayload(BaseModel):
+  description: str
+  session_id: Optional[str] = None
+  include_logs: bool = Field(default=False)
+  email: Optional[str] = None
+
+
 class ConversionStartPayload(BaseModel):
   project_path: str = Field(..., description='Source project root directory.')
   target_path: str = Field(..., description='Output directory for converted project.')
@@ -187,10 +254,11 @@ class ConversionStartPayload(BaseModel):
   conversion: Optional[ConversionSettingsPayload] = Field(default=None)
   performance: Optional[PerformanceSettingsPayload] = Field(default=None)
   ai: Optional[AISettingsPayload] = Field(default=None)
-  webhooks: Optional[List[str]] = Field(default=None)
+  webhooks: Optional[List[WebhookConfigPayload]] = Field(default=None)
   incremental: Optional[bool] = Field(default=False)
   git: Optional[GitSettingsPayload] = Field(default=None)
   backup: Optional[BackupSettingsPayload] = Field(default=None)
+  cost: Optional[CostSettingsPayload] = Field(default=None)
 
 
 class DiffExplanationPayload(BaseModel):
@@ -247,6 +315,20 @@ async def detect_project(payload: DetectPayload) -> Dict[str, Any]:
   return result
 
 
+@app.post('/conversion/preview')
+async def conversion_preview(payload: PreviewPayload) -> Dict[str, Any]:
+  project_path = Path(payload.project_path).expanduser().resolve()
+  if not project_path.exists() or not project_path.is_dir():
+    raise HTTPException(status_code=400, detail='Project path does not exist or is not a directory.')
+  estimate = conversion_manager.generate_preview(project_path, payload.direction, payload.exclusions or [])
+  model_identifier = payload.model_identifier or 'gpt-5'
+  estimated_cost = conversion_manager.cost_tracker.estimate_usd(model_identifier, estimate.estimated_tokens)
+  preview = estimate.summary()
+  preview['estimated_cost_usd'] = estimated_cost
+  preview['model_identifier'] = model_identifier
+  return {'preview': preview}
+
+
 @app.post('/conversion/start')
 async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
   project_path = Path(payload.project_path).expanduser().resolve()
@@ -255,10 +337,19 @@ async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail='Project path does not exist or is not a directory.')
   target_path.mkdir(parents=True, exist_ok=True)
 
-  conversion_settings = ConversionSettings(**payload.conversion.dict()) if payload.conversion else ConversionSettings()
+  conversion_dict = payload.conversion.dict() if payload.conversion else {}
+  exclusions = conversion_dict.get('exclusions') or []
+  preview_estimate = None
+  if conversion_dict.get('preview_mode'):
+    try:
+      preview_estimate = conversion_manager.generate_preview(project_path, payload.direction, exclusions)
+    except Exception as exc:  # pragma: no cover - preview optional
+      logger.warning('Preview estimation failed: %s', exc)
+  conversion_dict['exclusions'] = exclusions
+  conversion_settings = ConversionSettings(**conversion_dict) if conversion_dict else ConversionSettings()
   performance_settings = PerformanceSettings(**payload.performance.dict()) if payload.performance else PerformanceSettings()
   ai_settings = AISettings(**payload.ai.dict()) if payload.ai else AISettings()
-  webhooks = payload.webhooks or []
+  webhooks = [hook.dict(exclude_none=True) for hook in payload.webhooks] if payload.webhooks else []
   git_settings = GitSettings(
     enabled=payload.git.enabled if payload.git and payload.git.enabled is not None else settings.git_enabled,
     tag_after_completion=payload.git.tag_after_completion if payload.git and payload.git.tag_after_completion is not None else False,
@@ -273,6 +364,7 @@ async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
     remote_path=backup_payload.remote_path if backup_payload else settings.backup_remote_template,
     credential_id=backup_payload.credential_id if backup_payload else None
   )
+  cost_settings = CostSettings(**payload.cost.dict()) if payload.cost else CostSettings()
 
   session = conversion_manager.start_session(
     project_path=project_path,
@@ -287,7 +379,9 @@ async def conversion_start(payload: ConversionStartPayload) -> Dict[str, Any]:
     webhooks=webhooks,
     incremental=payload.incremental or False,
     git_settings=git_settings,
-    backup_settings=backup_settings
+    backup_settings=backup_settings,
+    cost_settings=cost_settings,
+    preview_estimate=preview_estimate
   )
 
   summary = session.progress.summary()
@@ -311,6 +405,21 @@ async def conversion_resume(payload: ConversionControlPayload) -> Dict[str, Any]
     raise HTTPException(status_code=404, detail='Session not found or completed.')
   summary = conversion_manager.get_summary(payload.session_id)
   return {'session_id': payload.session_id, 'summary': _serialize_summary(summary)}
+
+
+@app.post('/conversion/resume_failed')
+async def conversion_resume_failed(payload: ResumeFailedPayload) -> Dict[str, Any]:
+  try:
+    session = conversion_manager.resume_failed_session(
+      session_id=payload.session_id,
+      provider_id=payload.provider_id,
+      model_identifier=payload.model_identifier,
+      api_key=payload.api_key
+    )
+  except ValueError as exc:
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+  summary = conversion_manager.get_summary(session.session_id)
+  return {'session_id': session.session_id, 'summary': _serialize_summary(summary)}
 
 
 @app.get('/conversion/status/{session_id}')
@@ -370,7 +479,15 @@ def _serialize_summary(summary: Optional[Any]) -> Optional[Dict[str, Any]]:
     'manual_fixes_pending': summary.manual_fixes_pending,
     'backups': summary.backups,
     'test_results': summary.test_results,
-    'benchmarks': summary.benchmarks
+    'benchmarks': summary.benchmarks,
+    'cleanup_report': summary.cleanup_report.summary() if summary.cleanup_report else None,
+    'quality_score': summary.quality_score,
+    'warnings': summary.warnings,
+    'cost_settings': summary.cost_settings.__dict__ if summary.cost_settings else None,
+    'cost_percent_consumed': summary.cost_percent_consumed,
+    'project_type': summary.project_type,
+    'offline_mode': summary.offline_mode,
+    'preview_estimate': summary.preview_estimate.summary() if summary.preview_estimate else None
   }
 
 
@@ -430,9 +547,62 @@ async def save_template(payload: TemplatePayload) -> Dict[str, Any]:
     name=payload.name,
     conversion=ConversionSettings(**payload.conversion.dict()),
     performance=PerformanceSettings(**payload.performance.dict()),
-    ai=AISettings(**payload.ai.dict())
+    ai=AISettings(**payload.ai.dict()),
+    description=payload.description or '',
+    owner=payload.owner or 'local',
+    tags=payload.tags or []
   )
   return {'name': payload.name, 'path': str(path)}
+
+
+@app.post('/settings/templates/share')
+async def share_template(payload: TemplateSharePayload) -> Dict[str, Any]:
+  try:
+    descriptor = template_manager.share_template(
+      name=payload.name,
+      description=payload.description or '',
+      owner=payload.owner or 'community',
+      tags=payload.tags or []
+    )
+  except FileNotFoundError as exc:
+    raise HTTPException(status_code=404, detail=str(exc)) from exc
+  return {'template': descriptor}
+
+
+@app.delete('/settings/templates/{name}')
+async def delete_template(name: str) -> Dict[str, Any]:
+  template_manager.delete_template(name)
+  return {'status': 'deleted', 'name': name}
+
+
+@app.get('/community/metrics')
+async def community_metrics() -> Dict[str, Any]:
+  stats = conversion_manager.session_store.statistics()
+  return {
+    'stats': stats,
+    'active_sessions': conversion_manager.active_sessions()
+  }
+
+
+@app.post('/community/report')
+async def community_report(payload: IssueReportPayload) -> Dict[str, Any]:
+  report_dir = settings.data_dir / 'community' / 'reports'
+  report_dir.mkdir(parents=True, exist_ok=True)
+  timestamp = int(time.time() * 1000)
+  report_path = report_dir / f'report_{timestamp}.json'
+  content: Dict[str, Any] = {
+    'description': payload.description,
+    'session_id': payload.session_id,
+    'email': payload.email,
+    'created_at': timestamp
+  }
+  if payload.include_logs:
+    content['logs'] = event_logger.recent(200)
+  if payload.session_id:
+    summary = conversion_manager.get_summary(payload.session_id)
+    content['summary'] = _serialize_summary(summary)
+  report_path.write_text(json.dumps(content, indent=2), encoding='utf-8')
+  return {'report_path': str(report_path)}
 
 
 @app.get('/logs/recent')
@@ -583,6 +753,7 @@ async def start_batch(payload: BatchConversionPayload) -> Dict[str, Any]:
     remote_path=backup_payload.remote_path if backup_payload else settings.backup_remote_template,
     credential_id=backup_payload.credential_id if backup_payload else None
   )
+  cost_settings = CostSettings(**payload.cost.dict()) if payload.cost else CostSettings()
   scheduled = []
   for project in payload.projects:
     batch_item = BatchItem(
@@ -604,7 +775,8 @@ async def start_batch(payload: BatchConversionPayload) -> Dict[str, Any]:
       webhooks=[],
       incremental=payload.incremental or False,
       git_settings=git_settings,
-      backup_settings=backup_settings
+      backup_settings=backup_settings,
+      cost_settings=cost_settings
     )
     scheduled.append(session.session_id)
   return {'scheduled_sessions': scheduled}

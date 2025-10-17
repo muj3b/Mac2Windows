@@ -36,6 +36,78 @@ STAGE_WEIGHTS = {
 
 
 @dataclass
+class WebhookConfig:
+  url: str
+  headers: Dict[str, str] = field(default_factory=dict)
+  events: List[str] = field(default_factory=lambda: ['conversion.started', 'conversion.completed', 'conversion.failed'])
+  secret_token: Optional[str] = None
+
+  def should_fire(self, event_name: str) -> bool:
+    if not self.events:
+      return True
+    normalized = event_name.lower()
+    return any(event.lower() == normalized for event in self.events)
+
+  def as_dict(self) -> Dict[str, Any]:
+    return {
+      'url': self.url,
+      'headers': self.headers,
+      'events': self.events,
+      'secret_token': self.secret_token
+    }
+
+
+@dataclass
+class CostSettings:
+  enabled: bool = True
+  max_budget_usd: float = 50.0
+  warn_percent: float = 0.8
+  auto_switch_model: bool = True
+  fallback_model_identifier: Optional[str] = None
+  fallback_provider_id: Optional[str] = None
+
+
+@dataclass
+class CleanupReport:
+  unused_assets: List[str] = field(default_factory=list)
+  unused_dependencies: List[str] = field(default_factory=list)
+  total_bytes_reclaimed: int = 0
+  auto_deleted: List[str] = field(default_factory=list)
+  scanned_assets: int = 0
+  scanned_dependencies: int = 0
+
+  def summary(self) -> Dict[str, Any]:
+    return {
+      'unused_assets': self.unused_assets,
+      'unused_dependencies': self.unused_dependencies,
+      'total_bytes_reclaimed': self.total_bytes_reclaimed,
+      'auto_deleted': self.auto_deleted,
+      'scanned_assets': self.scanned_assets,
+      'scanned_dependencies': self.scanned_dependencies
+    }
+
+
+@dataclass
+class PreviewEstimate:
+  total_files: int = 0
+  impacted_files: int = 0
+  estimated_tokens: int = 0
+  estimated_cost_usd: float = 0.0
+  estimated_minutes: float = 0.0
+  stage_breakdown: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+  def summary(self) -> Dict[str, Any]:
+    return {
+      'total_files': self.total_files,
+      'impacted_files': self.impacted_files,
+      'estimated_tokens': self.estimated_tokens,
+      'estimated_cost_usd': self.estimated_cost_usd,
+      'estimated_minutes': self.estimated_minutes,
+      'stage_breakdown': self.stage_breakdown
+    }
+
+
+@dataclass
 class StageProgress:
   stage: Stage
   completed_units: int = 0
@@ -173,6 +245,16 @@ class ConversionSettings:
   optimize_assets: bool = True
   image_quality: int = 85
   max_image_megapixels: float = 4.0
+  cleanup_unused_assets: bool = True
+  cleanup_auto_delete: bool = False
+  cleanup_min_bytes: int = 1024 * 1024
+  preview_mode: bool = False
+  manual_fix_autofill: bool = True
+  quality_score_threshold: float = 0.7
+  project_type: Optional[str] = None
+  exclusions: List[str] = field(default_factory=list)
+  enable_learning: bool = True
+  learning_trigger_count: int = 3
 
 
 @dataclass
@@ -181,6 +263,9 @@ class PerformanceSettings:
   max_ram_gb: int = 16
   threads: int = 4
   api_rate_limit: int = 30
+  parallel_conversions: int = 1
+  build_timeout_seconds: int = 600
+  prefer_offline: bool = False
 
 
 @dataclass
@@ -188,6 +273,11 @@ class AISettings:
   temperature: float = 0.2
   strategy: str = 'balanced'
   retries: int = 3
+  offline_only: bool = False
+  prompt_tone: str = 'pro'
+  fallback_model_identifier: Optional[str] = None
+  fallback_provider_id: Optional[str] = None
+  smart_prompting: bool = True
 
 
 @dataclass
@@ -227,6 +317,14 @@ class ConversionSummary:
   backups: List[Dict[str, Any]] = field(default_factory=list)
   test_results: Optional[Dict[str, Any]] = None
   benchmarks: Dict[str, Any] = field(default_factory=dict)
+  cleanup_report: Optional[CleanupReport] = None
+  quality_score: Optional[float] = None
+  warnings: List[str] = field(default_factory=list)
+  cost_settings: Optional[CostSettings] = None
+  cost_percent_consumed: Optional[float] = None
+  project_type: Optional[str] = None
+  offline_mode: bool = False
+  preview_estimate: Optional[PreviewEstimate] = None
 
 
 @dataclass
@@ -255,10 +353,13 @@ class SessionState:
   performance_settings: PerformanceSettings = field(default_factory=PerformanceSettings)
   ai_settings: AISettings = field(default_factory=AISettings)
   backup_settings: BackupSettings = field(default_factory=BackupSettings)
-  webhooks: List[str] = field(default_factory=list)
+  webhooks: List[Dict[str, Any]] = field(default_factory=list)
   conversion_report: Optional[ConversionReport] = None
   incremental: bool = False
   git_settings: GitSettings = field(default_factory=GitSettings)
   manual_queue: Dict[str, ManualFixEntry] = field(default_factory=dict)
   test_results: Optional[Dict[str, Any]] = None
   benchmarks: Dict[str, Any] = field(default_factory=dict)
+  cost_settings: CostSettings = field(default_factory=CostSettings)
+  cleanup_report: Optional[CleanupReport] = None
+  preview_estimate: Optional[PreviewEstimate] = None

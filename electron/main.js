@@ -240,6 +240,24 @@ const setupIpcHandlers = () => {
     }
   });
 
+  ipcMain.handle('backend:shareTemplate', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/settings/templates/share`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:deleteTemplate', async (_event, name) => {
+    try {
+      const response = await axios.delete(`${BACKEND_URL}/settings/templates/${encodeURIComponent(name)}`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
   ipcMain.handle('backend:listBackupProviders', async () => {
     try {
       const response = await axios.get(`${BACKEND_URL}/backups/providers`);
@@ -279,6 +297,51 @@ const setupIpcHandlers = () => {
   ipcMain.handle('backend:listSessionBackups', async (_event, sessionId) => {
     try {
       const response = await axios.get(`${BACKEND_URL}/backups/sessions/${sessionId}`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:previewConversion', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/preview`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:resumeFailedConversion', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/resume_failed`, payload);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:startBatchConversion', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/conversion/batch`, payload, { timeout: 600000 });
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:getCommunityMetrics', async () => {
+    try {
+      const response = await axios.get(`${BACKEND_URL}/community/metrics`);
+      return response.data;
+    } catch (error) {
+      return { error: true, message: error.response?.data?.detail || error.message };
+    }
+  });
+
+  ipcMain.handle('backend:submitIssueReport', async (_event, payload) => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/community/report`, payload);
       return response.data;
     } catch (error) {
       return { error: true, message: error.response?.data?.detail || error.message };

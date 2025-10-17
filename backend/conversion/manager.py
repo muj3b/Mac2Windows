@@ -32,7 +32,11 @@ from backend.conversion.models import (
   Stage,
   StageProgress,
   STAGE_ORDER,
-  SymbolTableEntry
+  SymbolTableEntry,
+  WebhookConfig,
+  CostSettings,
+  CleanupReport,
+  PreviewEstimate
 )
 from backend.conversion.progress import ProgressTracker
 from backend.conversion.rag import RagContextBuilder
@@ -51,6 +55,13 @@ from backend.security.vulnerabilities import VulnerabilityScanner
 from backend.conversion.git_utils import GitHandler
 from backend.conversion.incremental import IncrementalState, calculate_checksum
 from backend.config import settings
+from backend.conversion.webhooks import WebhookManager
+from backend.conversion.cleanup import CleanupAnalyzer
+from backend.conversion.error_recovery import ErrorRecoveryEngine
+from backend.conversion.cost_tracker import CostTracker
+from backend.conversion.preview import PreviewAnalyzer
+from backend.conversion.project_types import ProjectTypeDetector
+from backend.conversion.batch import BatchQueue
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +87,7 @@ class ConversionSession:
   symbol_table: Dict[str, SymbolTableEntry] = field(default_factory=dict)
   quality_report: QualityReport = field(default_factory=QualityReport)
   conversion_report: Optional[ConversionReport] = None
-  webhooks: List[str] = field(default_factory=list)
+  webhooks: List[WebhookConfig] = field(default_factory=list)
   paused: bool = False
   created_at: float = field(default_factory=time.time)
   updated_at: float = field(default_factory=time.time)
@@ -88,6 +99,14 @@ class ConversionSession:
   manual_queue: Dict[str, ManualFixEntry] = field(default_factory=dict)
   test_results: Optional[Dict[str, Any]] = None
   benchmarks: Dict[str, Any] = field(default_factory=dict)
+  cost_settings: CostSettings = field(default_factory=CostSettings)
+  cleanup_report: CleanupReport = field(default_factory=CleanupReport)
+  preview_estimate: Optional[PreviewEstimate] = None
+  project_type: Optional[str] = None
+  quality_score: float = 0.0
+  offline_mode: bool = False
+  recovery_attempts: Dict[str, int] = field(default_factory=dict)
+  cost_warnings: List[str] = field(default_factory=list)
 
 
 class ConversionManager:
@@ -129,9 +148,19 @@ class ConversionManager:
     self.asset_optimizer = AssetOptimizer()
     self.test_harness = TestHarness()
     self.sessions: Dict[str, ConversionSession] = {}
+    self.webhook_manager = WebhookManager()
+    self.cleanup_analyzer = CleanupAnalyzer()
+    self.error_recovery = ErrorRecoveryEngine(event_logger=event_logger)
+    self.cost_tracker = CostTracker(event_logger=event_logger)
+    self.preview_analyzer = PreviewAnalyzer()
+    self.project_type_detector = ProjectTypeDetector()
+    self.batch_queue = BatchQueue()
 
   def active_sessions(self) -> List[str]:
     return list(self.sessions.keys())
+
+  def generate_preview(self, project_path: Path, direction: str, exclusions: Optional[List[str]] = None) -> PreviewEstimate:
+    return self.preview_analyzer.analyze(project_path, direction, exclusions)
 
   def _summarize_backups(self, session_id: str) -> List[Dict[str, Any]]:
     if not getattr(self, 'backup_manager', None):
@@ -160,6 +189,22 @@ class ConversionManager:
       summary.backups = self._summarize_backups(session_id)
       summary.test_results = session.test_results
       summary.benchmarks = session.benchmarks
+      summary.cleanup_report = session.cleanup_report
+      summary.quality_score = session.quality_score
+      summary.warnings = session.cost_warnings
+      summary.cost_settings = session.cost_settings
+      cost_state = self.cost_tracker.summary(session_id)
+      if cost_state:
+        summary.cost_usd = cost_state.get('total_cost', summary.cost_usd)
+        if cost_state.get('max_budget'):
+          summary.cost_percent_consumed = cost_state['total_cost'] / cost_state['max_budget']
+      summary.project_type = session.project_type
+      summary.offline_mode = session.offline_mode
+      summary.preview_estimate = session.preview_estimate
+      if summary.quality_report and summary.quality_score is None:
+        total_issues = len(summary.quality_report.issues)
+        severe_issues = sum(1 for issue in summary.quality_report.issues if issue.severity.lower() in {'error', 'critical'})
+        summary.quality_score = max(0.0, 1.0 - (severe_issues * 0.2 + total_issues * 0.05))
       return summary
     state = self.session_store.load(session_id)
     if not state:
@@ -178,6 +223,16 @@ class ConversionManager:
     summary.backups = self._summarize_backups(session_id)
     summary.test_results = state.test_results
     summary.benchmarks = state.benchmarks
+    summary.cleanup_report = state.cleanup_report
+    if summary.quality_report:
+      total_issues = len(summary.quality_report.issues)
+      severe_issues = sum(1 for issue in summary.quality_report.issues if issue.severity.lower() in {'error', 'critical'})
+      summary.quality_score = max(0.0, 1.0 - (severe_issues * 0.2 + total_issues * 0.05))
+    summary.cost_settings = state.cost_settings
+    summary.project_type = state.conversion_settings.project_type
+    summary.preview_estimate = state.preview_estimate
+    summary.offline_mode = state.ai_settings.offline_only or state.performance_settings.prefer_offline
+    summary.warnings = []
     return summary
 
   def pause_session(self, session_id: str) -> bool:
@@ -195,6 +250,101 @@ class ConversionManager:
     session.paused = False
     session.progress.resume()
     return True
+
+  def resume_failed_session(
+    self,
+    session_id: str,
+    provider_id: Optional[str] = None,
+    model_identifier: Optional[str] = None,
+    api_key: Optional[str] = None
+  ) -> ConversionSession:
+    if session_id in self.sessions:
+      raise ValueError('Session is already active.')
+    state = self.session_store.load(session_id)
+    if not state:
+      raise ValueError('Session not found.')
+    inferred_provider = provider_id
+    if not inferred_provider:
+      for record in state.chunks.values():
+        if record.provider_id:
+          inferred_provider = record.provider_id
+          break
+    inferred_model = model_identifier
+    if not inferred_model:
+      for record in state.chunks.values():
+        if record.ai_model:
+          inferred_model = record.ai_model
+          break
+    inferred_provider = inferred_provider or state.ai_settings.fallback_provider_id or state.cost_settings.fallback_provider_id or 'ollama'
+    if inferred_provider in {'mac-to-win', 'win-to-mac'}:
+      inferred_provider = 'ollama'
+    inferred_model = inferred_model or state.ai_settings.fallback_model_identifier or state.cost_settings.fallback_model_identifier or 'gpt-5-nano'
+
+    session = self.start_session(
+      project_path=state.project_path,
+      target_path=state.target_path,
+      direction=state.direction,
+      provider_id=inferred_provider,
+      model_identifier=inferred_model,
+      api_key=api_key,
+      conversion_settings=state.conversion_settings,
+      performance_settings=state.performance_settings,
+      ai_settings=state.ai_settings,
+      webhooks=state.webhooks,
+      incremental=state.incremental,
+      git_settings=state.git_settings,
+      backup_settings=state.backup_settings,
+      cost_settings=state.cost_settings,
+      preview_estimate=state.preview_estimate,
+      session_id_override=session_id
+    )
+
+    session.manual_queue = state.manual_queue
+    session.summary_notes.extend(['Resumed from previous failure'] + state.summary_notes[-10:])
+    session.quality_report = state.quality_report
+    session.test_results = state.test_results
+    session.benchmarks = state.benchmarks
+    session.cleanup_report = state.cleanup_report or session.cleanup_report
+
+    for chunk_id, saved_record in state.chunks.items():
+      if chunk_id not in session.chunks:
+        continue
+      current = session.chunks[chunk_id]
+      current.status = saved_record.status
+      current.output_path = saved_record.output_path
+      current.summary = saved_record.summary
+      current.cost_usd = saved_record.cost_usd
+      current.tokens_used = saved_record.tokens_used
+      current.input_tokens = saved_record.input_tokens
+      current.output_tokens = saved_record.output_tokens
+      current.ai_model = saved_record.ai_model
+      current.provider_id = saved_record.provider_id
+      if saved_record.status == ChunkStatus.COMPLETED:
+        session.progress.update_chunk(current)
+
+    for stage, progress in state.stage_progress.items():
+      session.progress.stage_progress[stage] = progress
+
+    self.cost_tracker.start(session_id, state.cost_settings)
+    total_cost = sum(record.cost_usd for record in state.chunks.values())
+    if hasattr(self.cost_tracker, 'seed'):
+      self.cost_tracker.seed(session_id, total_cost)
+    elif getattr(self.cost_tracker, '_sessions', None) is not None:
+      self.cost_tracker._sessions[session_id]['total_cost'] = total_cost
+
+    session.paused = False
+    session.progress.resume()
+    if self.event_logger:
+      self.event_logger.log_event(
+        'session_resume',
+        'Conversion session resumed after failure',
+        {
+          'session_id': session_id,
+          'provider': inferred_provider,
+          'model': inferred_model
+        }
+      )
+    return session
 
   def list_manual_fixes(self, session_id: str) -> List[Dict[str, Any]]:
     session = self.sessions.get(session_id)
@@ -266,13 +416,58 @@ class ConversionManager:
     conversion_settings: Optional[ConversionSettings] = None,
     performance_settings: Optional[PerformanceSettings] = None,
     ai_settings: Optional[AISettings] = None,
-    webhooks: Optional[List[str]] = None,
+    webhooks: Optional[List[object]] = None,
     incremental: bool = False,
     git_settings: Optional[GitSettings] = None,
-    backup_settings: Optional[BackupSettings] = None
+    backup_settings: Optional[BackupSettings] = None,
+    cost_settings: Optional[CostSettings] = None,
+    preview_estimate: Optional[PreviewEstimate] = None,
+    session_id_override: Optional[str] = None
   ) -> ConversionSession:
-    session_id = uuid.uuid4().hex[:12]
+    session_id = session_id_override or uuid.uuid4().hex[:12]
+    conversion_settings = conversion_settings or ConversionSettings()
+    performance_settings = performance_settings or PerformanceSettings()
+    ai_settings = ai_settings or AISettings()
+    backup_settings = backup_settings or BackupSettings()
+    cost_settings = cost_settings or CostSettings()
+    preview_estimate = preview_estimate or (
+      self.preview_analyzer.analyze(project_path, direction, conversion_settings.exclusions)
+      if conversion_settings.preview_mode
+      else None
+    )
+
+    hook_objects: List[WebhookConfig] = []
+    for entry in webhooks or []:
+      if isinstance(entry, WebhookConfig):
+        hook_objects.append(entry)
+        continue
+      if isinstance(entry, dict):
+        url = entry.get('url')
+        if not url:
+          continue
+        hook_objects.append(
+          WebhookConfig(
+            url=url,
+            headers=entry.get('headers', {}),
+            events=entry.get('events') or [],
+            secret_token=entry.get('secret_token')
+          )
+        )
+        continue
+      if isinstance(entry, str):
+        hook_objects.append(WebhookConfig(url=entry.strip()))
+
     work_plan = generate_work_plan(project_path, direction)
+    if conversion_settings.exclusions:
+      filtered_plan: Dict[Stage, List[ChunkWorkItem]] = {}
+      for stage, chunks in work_plan.items():
+        filtered_plan[stage] = [
+          chunk
+          for chunk in chunks
+          if not any(exclusion in str(chunk.file_path) for exclusion in conversion_settings.exclusions)
+        ]
+      work_plan = filtered_plan
+
     progress = ProgressTracker(direction=direction)
     for stage in STAGE_ORDER:
       chunks = work_plan.get(stage, [])
@@ -291,16 +486,16 @@ class ConversionManager:
       tag_prefix=settings.git_tag_prefix,
       branch=settings.git_branch
     )
-    conversion_settings = conversion_settings or ConversionSettings()
-    performance_settings = performance_settings or PerformanceSettings()
-    ai_settings = ai_settings or AISettings()
-    backup_settings = backup_settings or BackupSettings()
     if not backup_settings.provider:
       backup_settings.provider = settings.default_backup_provider
     if backup_settings.retention_count <= 0:
       backup_settings.retention_count = settings.backup_retention_count
     if not backup_settings.remote_path:
       backup_settings.remote_path = settings.backup_remote_template
+
+    profile = self.project_type_detector.analyse(project_path)
+    if not conversion_settings.project_type:
+      conversion_settings.project_type = profile.project_type
 
     session = ConversionSession(
       session_id=session_id,
@@ -318,11 +513,14 @@ class ConversionManager:
       performance_settings=performance_settings,
       ai_settings=ai_settings,
       backup_settings=backup_settings,
-      webhooks=webhooks or [],
+      webhooks=hook_objects,
       progress=progress,
       work_plan=work_plan,
       incremental=incremental,
-      git_settings=git_settings
+      git_settings=git_settings,
+      cost_settings=cost_settings,
+      preview_estimate=preview_estimate,
+      project_type=conversion_settings.project_type
     )
 
     for stage, chunks in work_plan.items():
@@ -330,6 +528,24 @@ class ConversionManager:
         record = ChunkRecord(chunk=chunk)
         session.chunks[chunk.chunk_id] = record
         session.progress.register_chunk(record)
+
+    offline_providers = {'ollama', 'local'}
+    provider_label = provider_id.lower()
+    session.offline_mode = (
+      ai_settings.offline_only
+      or performance_settings.prefer_offline
+      or provider_label in offline_providers
+      or model_identifier.lower().startswith('ollama')
+    )
+    session.quality_score = 1.0
+    session.summary_notes.append(
+      f"Session initialised ({direction}) using {'offline' if session.offline_mode else 'cloud'} mode."
+    )
+    if preview_estimate:
+      session.summary_notes.append(
+        f"Preview estimate: ~${preview_estimate.estimated_cost_usd:.2f}, ~{preview_estimate.estimated_minutes} minutes."
+      )
+    self.cost_tracker.start(session.session_id, cost_settings)
 
     # Tune resource thresholds based on performance settings
     self.resource_monitor.thresholds.cpu_percent = session.performance_settings.max_cpu
@@ -355,8 +571,18 @@ class ConversionManager:
           'session_id': session_id,
           'direction': direction,
           'provider': provider_id,
-          'model': model_identifier
+          'model': model_identifier,
+          'project_type': session.project_type,
+          'offline': session.offline_mode
         }
+      )
+    if session.webhooks:
+      asyncio.create_task(
+        self.webhook_manager.dispatch(
+          session.webhooks,
+          'conversion.started',
+          self._build_webhook_payload(session, status='started')
+        )
       )
     return session
 
@@ -473,15 +699,25 @@ class ConversionManager:
     if self.learning_memory:
       hints = self.learning_memory.suggestions(chunk.content)
       learning_hints = hints.get('matches', [])
-    try:
-      result = await self.orchestrator.convert_chunk(
+    async def _invoke(config: OrchestrationConfig) -> Dict[str, Any]:
+      return await self.orchestrator.convert_chunk(
         chunk=chunk,
-        config=session.orchestrator_config,
+        config=config,
         ai_settings=session.ai_settings,
         direction=session.direction,
         rag_context=context,
         previous_summary=previous_summary,
         learning_hints=learning_hints
+      )
+
+    try:
+      result = await self.error_recovery.execute(
+        _invoke,
+        session_id=session.session_id,
+        chunk_id=chunk.chunk_id,
+        ai_settings=session.ai_settings,
+        cost_settings=session.cost_settings,
+        base_config=session.orchestrator_config
       )
     except ProviderError as exc:
       record.status = ChunkStatus.FAILED
@@ -515,11 +751,36 @@ class ConversionManager:
     if stopped_early:
       record.last_error = result.get('last_error', 'Model halted early; instructing resume.')
 
+    session.progress.update_chunk(record)
+
+    cost_update = self.cost_tracker.update(session.session_id, session.cost_settings, cost_usd)
+    session.cost_settings = session.cost_settings
+    if cost_update.warning:
+      session.cost_warnings.append(cost_update.warning)
+      session.summary_notes.append(cost_update.warning)
+      if self.event_logger:
+        self.event_logger.log_event('cost_warning', cost_update.warning, {'session_id': session.session_id})
+    if cost_update.switched_model:
+      self._apply_cost_switch(session)
+      session.summary_notes.append('Model switched to stay within budget.')
+    if not cost_update.continue_processing:
+      session.paused = True
+      session.progress.pause()
+      session.summary_notes.append('Conversion paused: cost limit reached.')
+      if session.webhooks:
+        asyncio.create_task(
+          self.webhook_manager.dispatch(
+            session.webhooks,
+            'conversion.paused',
+            self._build_webhook_payload(session, status='paused')
+          )
+        )
+      return
+
     session.summary_notes.append(summary)
     session.last_chunk_summary[chunk.file_path.as_posix()] = summary
     self.rag_builder.register_chunk(chunk, summary, output_text)
     session.symbol_table.update(self._extract_symbols(chunk))
-    session.progress.update_chunk(record)
 
     if chunk.stage == Stage.CODE:
       self._assemble_file_if_ready(session, chunk.chunk.file_path)
@@ -591,6 +852,10 @@ class ConversionManager:
     )
     session.chunks['quality-report'] = quality_record
     session.progress.update_chunk(quality_record)
+    total_issues = len(report.issues)
+    severe_issues = sum(1 for issue in report.issues if issue.severity.lower() in {'error', 'critical'})
+    session.quality_score = max(0.0, 1.0 - (severe_issues * 0.2 + total_issues * 0.05))
+    session.summary_notes.append(f'Quality score: {session.quality_score:.2f} ({total_issues} issues, {severe_issues} critical).')
     benchmarks = run_benchmarks(session.project_path, session.target_path, session.direction)
     session.benchmarks = benchmarks
     regressions = benchmarks.get('regressions') or []
@@ -662,6 +927,26 @@ class ConversionManager:
     resume_record = ChunkRecord(chunk=resume_chunk, status=ChunkStatus.PENDING)
     session.chunks[resume_chunk.chunk_id] = resume_record
     session.work_plan[chunk.stage].append(resume_chunk)
+
+  def _apply_cost_switch(self, session: ConversionSession) -> None:
+    fallback_model = (
+      session.cost_settings.fallback_model_identifier
+      or session.ai_settings.fallback_model_identifier
+    )
+    if not fallback_model:
+      return
+    fallback_provider = (
+      session.cost_settings.fallback_provider_id
+      or session.ai_settings.fallback_provider_id
+      or session.orchestrator_config.provider_id
+    )
+    session.orchestrator_config = OrchestrationConfig(
+      provider_id=fallback_provider,
+      model_identifier=fallback_model,
+      api_key=session.orchestrator_config.api_key,
+      temperature=session.orchestrator_config.temperature,
+      max_tokens=session.orchestrator_config.max_tokens
+    )
 
   def _determine_output_path(self, session: ConversionSession, chunk: ChunkWorkItem) -> Path:
     relative = chunk.file_path.relative_to(session.project_path)
@@ -830,10 +1115,49 @@ class ConversionManager:
       [record.chunk.file_path for record in session.chunks.values() if record.chunk.stage == Stage.CODE]
     )
     try:
-        self.incremental_cache.save(settings.incremental_cache_path)
+      self.incremental_cache.save(settings.incremental_cache_path)
     except Exception as exc:  # pragma: no cover - protective
       if self.event_logger:
         self.event_logger.log_error('incremental_save_failed', {'error': str(exc)})
+    cleanup_report = None
+    if success:
+      try:
+        cleanup_report = self.cleanup_analyzer.analyze(session.target_path, session.conversion_settings)
+        session.cleanup_report = cleanup_report
+        if cleanup_report.total_bytes_reclaimed > 0:
+          saved_mb = cleanup_report.total_bytes_reclaimed / (1024 * 1024)
+          session.summary_notes.append(f'Cleanup identified {len(cleanup_report.unused_assets)} unused assets ({saved_mb:.2f} MB).')
+      except Exception as exc:  # pragma: no cover
+        session.summary_notes.append(f'Cleanup skipped: {exc}')
+        if self.event_logger:
+          self.event_logger.log_error('cleanup_failed', {'session_id': session.session_id, 'error': str(exc)})
+    else:
+      session.summary_notes.append('Session ended with errors. Use Resume Failed Conversion to continue.')
+
+    self.cost_tracker.finish(session.session_id)
+    event_name = 'conversion.completed' if success else 'conversion.failed'
+    error_message = None if success else (session.summary_notes[-1] if session.summary_notes else 'Conversion failed')
+    if self.event_logger:
+      self.event_logger.log_event(
+        'session_complete',
+        f'Conversion session {"completed" if success else "failed"}',
+        {
+          'session_id': session.session_id,
+          'success': success,
+          'cost_usd': session.progress.summary().cost_usd if session.progress else 0.0,
+          'warnings': session.cost_warnings
+        }
+      )
+    if session.webhooks:
+      asyncio.create_task(
+        self.webhook_manager.dispatch(
+          session.webhooks,
+          event_name,
+          self._build_webhook_payload(session, status='completed' if success else 'failed', error=error_message)
+        )
+      )
+    asyncio.create_task(self._persist_session(session))
+    self.sessions.pop(session.session_id, None)
 
   def _enqueue_manual_fix(self, session: ConversionSession, record: ChunkRecord, reason: str, note: Optional[str] = None) -> None:
     entry = session.manual_queue.get(record.chunk.chunk_id)
@@ -1030,13 +1354,16 @@ class ConversionManager:
       performance_settings=session.performance_settings,
       ai_settings=session.ai_settings,
       backup_settings=session.backup_settings,
-      webhooks=session.webhooks,
+      webhooks=[hook.as_dict() if isinstance(hook, WebhookConfig) else hook for hook in session.webhooks],
       conversion_report=session.conversion_report,
       incremental=session.incremental,
       git_settings=session.git_settings,
       manual_queue=session.manual_queue,
       test_results=session.test_results,
-      benchmarks=session.benchmarks
+      benchmarks=session.benchmarks,
+      cost_settings=session.cost_settings,
+      cleanup_report=session.cleanup_report,
+      preview_estimate=session.preview_estimate
     )
     self.session_store.upsert(state)
     session.last_save = now
@@ -1050,18 +1377,73 @@ class ConversionManager:
   async def _trigger_webhooks(self, session: ConversionSession) -> None:
     if not session.webhooks:
       return
-    if not session.conversion_report:
-      return
-    import json
-    import requests
+    payload = self._build_webhook_payload(session, status='quality')
+    await self.webhook_manager.dispatch(session.webhooks, 'conversion.quality_ready', payload)
 
-    payload = json.dumps(session.conversion_report.metadata)
-    headers = {'Content-Type': 'application/json'}
-    for url in session.webhooks:
-      try:
-        requests.post(url, data=payload, headers=headers, timeout=5)
-      except Exception as error:  # pragma: no cover - network optional
-        logger.warning('Webhook %s failed: %s', url, error)
+  def _build_webhook_payload(self, session: ConversionSession, status: str, error: Optional[str] = None) -> Dict[str, Any]:
+    summary = session.progress.summary()
+    cost_state = self.cost_tracker.summary(session.session_id) or {}
+    stage_progress = {
+      stage.name: {
+        'completed': progress.completed_units,
+        'total': progress.total_units,
+        'percentage': progress.percentage
+      }
+      for stage, progress in summary.stage_progress.items()
+    }
+    converted = sorted({
+      str(record.output_path)
+      for record in session.chunks.values()
+      if record.status == ChunkStatus.COMPLETED and record.output_path
+    })
+    diff_artifacts = []
+    if session.conversion_report:
+      diff_artifacts = [
+        {
+          'source': str(artifact.source_path),
+          'target': str(artifact.target_path),
+          'diff_html': str(artifact.diff_html_path)
+        }
+        for artifact in session.conversion_report.diff_artifacts
+      ]
+    percent_value = summary.cost_percent_consumed
+    if percent_value is None and cost_state.get('max_budget'):
+      percent_value = min(cost_state.get('total_cost', summary.cost_usd) / cost_state.get('max_budget'), 1.0)
+
+    payload: Dict[str, Any] = {
+      'session_id': session.session_id,
+      'status': status,
+      'error': error,
+      'direction': session.direction,
+      'project_type': session.project_type,
+      'offline_mode': session.offline_mode,
+      'quality_score': session.quality_score,
+      'summary': {
+        'overall_percentage': summary.overall_percentage,
+        'converted_files': summary.converted_files,
+        'total_files': summary.total_files,
+        'elapsed_seconds': summary.elapsed_seconds,
+        'estimated_seconds_remaining': summary.estimated_seconds_remaining,
+        'tokens_used': summary.tokens_used,
+        'cost_usd': summary.cost_usd
+      },
+      'stage_progress': stage_progress,
+      'quality_report': summary.quality_report.summary() if summary.quality_report else None,
+      'cleanup_report': session.cleanup_report.summary() if session.cleanup_report else None,
+      'cost': {
+        'total': cost_state.get('total_cost', summary.cost_usd),
+        'max_budget': cost_state.get('max_budget'),
+        'percent': percent_value,
+        'warnings': session.cost_warnings
+      },
+      'converted_paths': converted,
+      'diff_artifacts': diff_artifacts,
+      'backups': self._summarize_backups(session.session_id),
+      'manual_queue': [entry.to_dict() for entry in session.manual_queue.values()],
+      'preview': session.preview_estimate.summary() if session.preview_estimate else None,
+      'notes': session.summary_notes[-10:]
+    }
+    return payload
 
   def set_debug_mode(self, enabled: bool) -> None:
     self.debug_mode = enabled
