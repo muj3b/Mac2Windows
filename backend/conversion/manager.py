@@ -43,13 +43,11 @@ from backend.conversion.rag import RagContextBuilder
 from backend.conversion.session_store import ConversionSessionStore
 from backend.resources.monitor import ResourceMonitor
 from backend.quality.engine import QualityEngine
-from backend.performance.benchmark import run_benchmarks
 from backend.conversion.resources import ResourceConverter
 from backend.conversion.dependencies import DependencyGenerator
 from backend.conversion.project import ProjectGenerator
 from backend.conversion.validators import ValidationEngine
 from backend.conversion.assets import AssetOptimizer
-from backend.conversion.tests import TestHarness
 from backend.security.licenses import LicenseScanner
 from backend.security.vulnerabilities import VulnerabilityScanner
 from backend.conversion.git_utils import GitHandler
@@ -146,7 +144,7 @@ class ConversionManager:
     self.manual_fix_root = settings.data_dir / 'manual_fixes'
     self.manual_fix_root.mkdir(parents=True, exist_ok=True)
     self.asset_optimizer = AssetOptimizer()
-    self.test_harness = TestHarness()
+    self.test_harness = None
     self.sessions: Dict[str, ConversionSession] = {}
     self.webhook_manager = WebhookManager()
     self.cleanup_analyzer = CleanupAnalyzer()
@@ -1059,6 +1057,7 @@ class ConversionManager:
     severe_issues = sum(1 for issue in report.issues if issue.severity.lower() in {'error', 'critical'})
     session.quality_score = max(0.0, 1.0 - (severe_issues * 0.2 + total_issues * 0.05))
     session.summary_notes.append(f'Quality score: {session.quality_score:.2f} ({total_issues} issues, {severe_issues} critical).')
+    from backend.performance.benchmark import run_benchmarks
     benchmarks = run_benchmarks(session.project_path, session.target_path, session.direction)
     session.benchmarks = benchmarks
     regressions = benchmarks.get('regressions') or []
@@ -1511,6 +1510,9 @@ class ConversionManager:
     session.progress.update_chunk(record)
 
   async def _finalize_tests(self, session: ConversionSession) -> None:
+    if self.test_harness is None:
+      from backend.conversion.tests import TestHarness
+      self.test_harness = TestHarness()
     test_result = await asyncio.to_thread(self.test_harness.run, session)
     if not test_result:
       return

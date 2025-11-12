@@ -195,11 +195,16 @@ class AIOrchestrator:
     context_summaries = [ctx.get('summary') or ctx.get('document') or '' for ctx in rag_context[:10]]
     dependency_map = self.dependency_mapping.directional_map(direction)
     api_map = self.api_mapping.directional_map(direction)
+    from backend.conversion.mappings import SHORTCUT_MAP, MENU_ROLE_MAP
+    shortcut_map = SHORTCUT_MAP.get(direction, {})
+    menu_role_map = MENU_ROLE_MAP.get(direction, {})
     return build_conversion_prompt(
       direction=direction,
       chunk=chunk,
       dependency_map=dependency_map,
       api_map=api_map,
+      shortcut_map=shortcut_map,
+      menu_role_map=menu_role_map,
       context_summaries=context_summaries,
       learning_hints=learning_hints,
       previous_summary=previous_summary

@@ -10,6 +10,8 @@ def build_conversion_prompt(
   chunk: ChunkWorkItem,
   dependency_map: Dict[str, str],
   api_map: Dict[str, str],
+  shortcut_map: Dict[str, str],
+  menu_role_map: Dict[str, str],
   context_summaries: Iterable[str],
   learning_hints: Optional[List[str]],
   previous_summary: Optional[str]
@@ -21,6 +23,8 @@ def build_conversion_prompt(
     context_section = '- (no additional context)'
   mapping_section = '\n'.join(f'- {src} → {dst}' for src, dst in dependency_map.items()) or '(no dependency remapping hints)'
   api_section = '\n'.join(f'- {src} → {dst}' for src, dst in api_map.items()) or '(no API mapping hints)'
+  shortcut_section = '\n'.join(f'- {src} → {dst}' for src, dst in shortcut_map.items()) or '(no shortcut mapping hints)'
+  menu_role_section = '\n'.join(f'- {src} → {dst}' for src, dst in menu_role_map.items()) or '(no menu role mapping hints)'
   learning_section = ''
   if learning_hints:
     learning_section = '\n'.join(f'- {hint}' for hint in learning_hints[:5])
@@ -58,6 +62,12 @@ DEPENDENCY MAPPINGS
 
 API MAPPINGS
 {api_section}
+
+SHORTCUTS
+{shortcut_section}
+
+MENU ROLES
+{menu_role_section}
 
 PRIOR LEARNING / CORRECTIONS
 {learning_section or '(none)'}
@@ -98,14 +108,20 @@ def _directional_guidelines(direction: str, target_language: str) -> str:
 - Replace URLSession/NSURLConnection with HttpClient and HttpRequestMessage.
 - Persist data via Entity Framework or community equivalents for Core Data.
 - Convert dispatch queues to Task.Run or DispatcherQueue depending on UI thread requirements.
-- Replace Storyboard/XIB references with XAML NavigationView/Page structures where relevant."""
+- Replace Storyboard/XIB references with XAML NavigationView/Page structures where relevant.
+- Map macOS menu bar items to Windows app menus with accelerators; translate Command/Option to Ctrl/Alt.
+- Ensure accessibility properties are set (AutomationProperties.Name/HelpText) and keyboard navigation works.
+- Adjust for DPI scaling and font metrics; prefer layout containers over absolute positioning."""
   else:
     return f"""- Target modern {target_language} (Swift 5+/SwiftUI where practical).
 - Convert ViewModels to ObservableObject with @Published properties.
 - Replace HttpClient with URLSession (async/await).
 - Convert dependency injection patterns to Swift protocols/structs.
 - Translate WPF/WinUI bindings into SwiftUI state/binding patterns.
-- Map Dispatcher/Task scheduling to DispatchQueue or Task.detached as appropriate."""
+- Map Dispatcher/Task scheduling to DispatchQueue or Task.detached as appropriate.
+- Map Windows app menus and accelerators to macOS menu bar items and Command/Option keys.
+- Use accessibility modifiers (accessibilityLabel, accessibilityHint) and ensure keyboard focus behaviour.
+- Adjust for Retina scaling and dynamic type; prefer stacks and grids over fixed frames."""
 
 
 def _common_pitfall_examples(direction: str) -> str:

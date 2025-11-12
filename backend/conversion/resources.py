@@ -27,6 +27,10 @@ class ResourceConverter:
 
     if suffix in {'.png', '.jpg', '.jpeg'}:
       return self._convert_images(direction, source, output_dir)
+    if suffix == '.icns' and direction == 'mac-to-win':
+      return [self._icns_to_ico(source, output_dir)]
+    if suffix == '.ico' and direction == 'win-to-mac':
+      return [self._ico_to_icns(source, output_dir)]
     if suffix == '.strings':
       if direction == 'mac-to-win':
         return [self._strings_to_resx(source, output_dir)]
@@ -87,6 +91,27 @@ class ResourceConverter:
     tree = ET.ElementTree(resx)
     tree.write(output, encoding='utf-8', xml_declaration=True)
     return output
+
+  def _icns_to_ico(self, source: Path, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / (source.stem + '.ico')
+    try:
+      with Image.open(source) as img:
+        sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        img.save(target, sizes=sizes)
+    except Exception:
+      target.write_bytes(source.read_bytes())
+    return target
+
+  def _ico_to_icns(self, source: Path, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / (source.stem + '.icns')
+    try:
+      with Image.open(source) as img:
+        img.save(target)
+    except Exception:
+      target.write_bytes(source.read_bytes())
+    return target
 
   def _resx_to_strings(self, source: Path, output_dir: Path) -> Path:
     tree = ET.parse(source)

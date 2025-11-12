@@ -17,9 +17,16 @@ class ValidationEngine:
         if not self.dotnet_path:
             return [QualityIssue(category='build', message='dotnet CLI not available', severity='info')]
         solution = next(project_root.glob('*.sln'), None)
-        if not solution:
-            return [QualityIssue(category='build', message='Solution file not found', severity='warning')]
-        process = subprocess.run([self.dotnet_path, 'build', str(solution)], capture_output=True, text=True)
+        target = solution
+        if not target:
+            csproj = next(project_root.glob('**/*.csproj'), None)
+            target = csproj
+        if not target:
+            return [QualityIssue(category='build', message='Solution or project file not found', severity='warning')]
+        restore = subprocess.run([self.dotnet_path, 'restore', str(target)], capture_output=True, text=True)
+        if restore.returncode != 0:
+            return [QualityIssue(category='build', message=restore.stderr or restore.stdout, severity='error')]
+        process = subprocess.run([self.dotnet_path, 'build', str(target), '-c', 'Release'], capture_output=True, text=True)
         if process.returncode == 0:
             return []
         return [QualityIssue(category='build', message=process.stderr or process.stdout, severity='error')]
@@ -28,6 +35,14 @@ class ValidationEngine:
         if not self.swiftc_path:
             return [QualityIssue(category='build', message='swiftc not available', severity='info')]
         issues: List[QualityIssue] = []
+        xcodeproj = next(project_root.glob('*.xcodeproj'), None)
+        if xcodeproj:
+            xcodebuild = shutil.which('xcodebuild')
+            if xcodebuild:
+                process = subprocess.run([xcodebuild, '-project', str(xcodeproj), '-configuration', 'Release', '-quiet', 'build'], capture_output=True, text=True)
+                if process.returncode == 0:
+                    return []
+                issues.append(QualityIssue(category='build', message=process.stderr or process.stdout, severity='error'))
         for swift_file in project_root.rglob('*.swift'):
             process = subprocess.run([self.swiftc_path, '-typecheck', str(swift_file)], capture_output=True, text=True)
             if process.returncode != 0:
