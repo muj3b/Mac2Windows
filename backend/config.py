@@ -23,6 +23,7 @@ class Settings:
   openai_api_key: Optional[str] = os.getenv('OPENAI_API_KEY')
   openai_base_url: str = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
   openai_organization: Optional[str] = os.getenv('OPENAI_ORG_ID')
+  gemini_api_key: Optional[str] = os.getenv('GEMINI_API_KEY')
   ollama_base_url: str = os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
   request_timeout_seconds: float = float(os.getenv('CONVERTER_REQUEST_TIMEOUT', '60'))
   ai_retry_attempts: int = int(os.getenv('CONVERTER_AI_RETRY_ATTEMPTS', '3'))

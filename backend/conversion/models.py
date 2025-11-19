@@ -280,6 +280,7 @@ class AISettings:
   fallback_model_identifier: Optional[str] = None
   fallback_provider_id: Optional[str] = None
   smart_prompting: bool = True
+  use_thinking_mode: bool = False
 
 
 @dataclass

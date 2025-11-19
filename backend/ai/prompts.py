@@ -14,7 +14,8 @@ def build_conversion_prompt(
   menu_role_map: Dict[str, str],
   context_summaries: Iterable[str],
   learning_hints: Optional[List[str]],
-  previous_summary: Optional[str]
+  previous_summary: Optional[str],
+  thinking_output: Optional[str] = None
 ) -> str:
   source_language = chunk.language or 'source'
   target_language = infer_target_language(direction, source_language)
@@ -29,9 +30,32 @@ def build_conversion_prompt(
   if learning_hints:
     learning_section = '\n'.join(f'- {hint}' for hint in learning_hints[:5])
   previous_summary = previous_summary or '(none)'
+  thinking_section = ''
+  if thinking_output:
+    thinking_section = f"\nPRE-COMPUTED ANALYSIS (THINKING MODE)\n{thinking_output}\n"
 
   guidelines = _directional_guidelines(direction, target_language)
   pitfall_examples = _common_pitfall_examples(direction)
+  
+  platform_specifics = ""
+  if direction == 'mac-to-win':
+    platform_specifics = """
+PLATFORM SPECIFIC MIGRATION (Mac -> Windows):
+- **Menu Bar**: Convert macOS Menu Bar items to Windows System Tray (Notification Area) icons or standard window menus (File/Edit/etc).
+- **App Lifecycle**: Windows apps often minimize to tray instead of terminating. Handle `WM_CLOSE` vs `WM_QUIT`.
+- **File Paths**: Ensure backslashes `\\` are used or use `Path.Combine`. Handle drive letters (C:).
+- **Settings**: Migrate `NSUserDefaults` to Windows Registry or `AppData` config files.
+- **Installer**: Suggest MSIX or Inno Setup instead of DMG/Pkg.
+"""
+  elif direction == 'win-to-mac':
+    platform_specifics = """
+PLATFORM SPECIFIC MIGRATION (Windows -> Mac):
+- **System Tray**: Convert Windows System Tray icons to macOS Menu Bar extras (NSStatusItem).
+- **Window Management**: Handle macOS window lifecycle (app stays running when last window closes).
+- **File Paths**: Use forward slashes `/`. Handle case-sensitive file systems if applicable.
+- **Settings**: Migrate Registry keys to `NSUserDefaults` (plist).
+- **Sandboxing**: Ensure file access complies with macOS App Sandbox rules.
+"""
 
   return f"""You are an expert software engineer specialising in cross-platform conversions.
 Convert the following {source_language} code into **{target_language}** suitable for the target platform.
@@ -54,6 +78,8 @@ TARGET CONTEXT
 GUIDELINES
 {guidelines}
 
+{platform_specifics}
+
 COMMON PITFALL EXAMPLES
 {pitfall_examples}
 
@@ -71,6 +97,8 @@ MENU ROLES
 
 PRIOR LEARNING / CORRECTIONS
 {learning_section or '(none)'}
+
+{thinking_section}
 
 SUPPORTING CONTEXT
 {context_section}
@@ -262,3 +290,42 @@ def infer_test_frameworks(direction: str, source_language: str) -> Tuple[str, st
   if normalized == 'mac-to-win':
     return ('XCTest', 'NUnit')
   return ('NUnit', 'XCTest')
+
+
+def build_thinking_prompt(
+  direction: str,
+  chunk: ChunkWorkItem,
+  context_summaries: Iterable[str]
+) -> str:
+  source_language = chunk.language or 'source'
+  target_language = infer_target_language(direction, source_language)
+  context_section = '\n'.join(f'- {summary}' for summary in context_summaries if summary) or '(no additional context)'
+  
+  return f"""You are an expert software architect. Analyze the following {source_language} code to prepare for a conversion to {target_language}.
+  
+  GOAL: Provide a detailed technical analysis to guide the conversion process.
+  
+  CONTEXT:
+  - Direction: {direction}
+  - File: {chunk.file_path}
+  - Additional Context:
+  {context_section}
+  
+  SOURCE CODE:
+  ```{source_language.lower()}
+  {chunk.content}
+  ```
+  
+  INSTRUCTIONS:
+  1. Identify the core responsibilities of this code.
+  2. List specific platform-dependent APIs (e.g., UI frameworks, file I/O, threading) that need migration.
+  3. Suggest the most appropriate {target_language} equivalents or patterns.
+     - **CRITICAL**: If converting Mac Menu Bar, explicitly plan for Windows System Tray or Window Menus.
+     - **CRITICAL**: If converting Windows Tray, explicitly plan for Mac Status Bar Items.
+  4. Highlight potential pitfalls (e.g., memory management differences, async patterns).
+  5. Do NOT generate the converted code yet. Focus on the "HOW" and "WHY".
+  
+  OUTPUT FORMAT:
+  - Concise bullet points.
+  - Clear headings for "Responsibilities", "API Migration", "Patterns", and "Risks".
+  """

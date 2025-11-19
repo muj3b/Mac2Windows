@@ -7,18 +7,17 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
 from backend.ai.clients import (
-  BaseLLMClient,
-  ClaudeClient,
-  OpenAIClient,
-  OllamaClient,
-  ProviderError,
-  ProviderResult
+  BaseLLMClient, ClaudeClient, OpenAIClient, OllamaClient, GeminiClient, ProviderError, ProviderResult
 )
 from backend.ai.prompts import (
   build_conversion_prompt,
   build_diff_explanation_prompt,
   build_review_prompt,
+  build_conversion_prompt,
+  build_diff_explanation_prompt,
+  build_review_prompt,
   build_test_prompt,
+  build_thinking_prompt,
   infer_target_language,
   infer_test_frameworks
 )
@@ -73,8 +72,17 @@ class AIOrchestrator:
     )
 
     route = self.model_router.route(chunk, ai_settings, config.provider_id, config.model_identifier)
+    
+    thinking_output = None
+    if ai_settings.use_thinking_mode:
+      try:
+        thinking_output = await self._think_about_conversion(chunk, route, direction, rag_context)
+        logger.info('Thinking step completed for chunk %s', chunk.chunk_id)
+      except Exception as exc:
+        logger.warning('Thinking step failed for chunk %s: %s', chunk.chunk_id, exc)
+
     prompt_metadata = self._prompt_metadata(chunk, direction, rag_context, previous_summary, learning_hints)
-    prompt = self._build_prompt(chunk, direction, rag_context, previous_summary, learning_hints)
+    prompt = self._build_prompt(chunk, direction, rag_context, previous_summary, learning_hints, thinking_output)
 
     attempt = 0
     cumulative_cost = 0.0
@@ -190,7 +198,8 @@ class AIOrchestrator:
     direction: str,
     rag_context: List[Dict[str, str]],
     previous_summary: Optional[str],
-    learning_hints: Optional[List[str]]
+    learning_hints: Optional[List[str]],
+    thinking_output: Optional[str] = None
   ) -> str:
     context_summaries = [ctx.get('summary') or ctx.get('document') or '' for ctx in rag_context[:10]]
     dependency_map = self.dependency_mapping.directional_map(direction)
@@ -207,7 +216,8 @@ class AIOrchestrator:
       menu_role_map=menu_role_map,
       context_summaries=context_summaries,
       learning_hints=learning_hints,
-      previous_summary=previous_summary
+      previous_summary=previous_summary,
+      thinking_output=thinking_output
     )
 
   async def _invoke_model(
@@ -269,6 +279,8 @@ class AIOrchestrator:
   def _get_client(self, provider_id: str) -> BaseLLMClient:
     if provider_id in self._clients:
       return self._clients[provider_id]
+    if provider_id.startswith('gemini'):
+      client = GeminiClient()
     if provider_id.startswith('claude'):
       client = ClaudeClient()
     elif provider_id.startswith('gpt-5') or provider_id == 'openai-compatible':
@@ -332,3 +344,22 @@ class AIOrchestrator:
     except json.JSONDecodeError:
       logger.warning('Review response not JSON, treating as manual note')
     return {'issues': [{'message': response_text, 'severity': 'info', 'auto_fix': None, 'manual_note': response_text}]}
+
+  async def _think_about_conversion(
+    self,
+    chunk: ChunkWorkItem,
+    route: ModelRoute,
+    direction: str,
+    rag_context: List[Dict[str, str]]
+  ) -> str:
+    context_summaries = [ctx.get('summary') or ctx.get('document') or '' for ctx in rag_context[:5]]
+    prompt = build_thinking_prompt(direction, chunk, context_summaries)
+    
+    # Use a slightly higher temperature for creative analysis
+    result = await self._invoke_model(
+      route=route,
+      prompt=prompt,
+      temperature=0.3,
+      max_tokens=2048
+    )
+    return result.output_text.strip()

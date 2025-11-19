@@ -68,7 +68,11 @@ class ProviderRegistry:
         return settings.anthropic_api_key is not None
       if provider.id.startswith('gpt-5'):
         return settings.openai_api_key is not None
-      if provider.id in {'deepseek-v3-2', 'codestral', 'custom-endpoint', 'gemini-2-5-pro', 'gemini-flash-2-0'}:
+      if provider.id.startswith('gpt-5'):
+        return settings.openai_api_key is not None
+      if provider.id.startswith('gemini'):
+        return settings.gemini_api_key is not None
+      if provider.id in {'deepseek-v3-2', 'codestral', 'custom-endpoint'}:
         return True
       return True
 

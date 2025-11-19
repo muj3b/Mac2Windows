@@ -5,14 +5,73 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict
 
-DEPENDENCY_MAP = {
-    'Alamofire': 'Microsoft.Extensions.Http',
-    'Kingfisher': 'SixLabors.ImageSharp',
-    'RxSwift': 'System.Reactive',
-    'RealmSwift': 'Realm',
-    'Firebase': 'FirebaseAdmin',
-    'URLSession': 'System.Net.Http',
-    'SwiftUI': 'CommunityToolkit.Mvvm'
+DEFAULT_MAPPINGS = {
+  'mac-to-win': {
+    # UI Frameworks
+    'AppKit': 'System.Windows.Forms',
+    'UIKit': 'System.Windows.Controls (WPF)',
+    'SwiftUI': 'WinUI 3 / MAUI',
+    'Cocoa': 'WPF / WinForms',
+    'CoreGraphics': 'System.Drawing / SkiaSharp',
+    'CoreAnimation': 'System.Windows.Media.Animation',
+    
+    # Core Systems
+    'Foundation': 'System',
+    'CoreFoundation': 'System.Runtime.InteropServices',
+    'Grand Central Dispatch (GCD)': 'System.Threading.Tasks (TPL)',
+    'XPC': 'Named Pipes / WCF',
+    'UserDefaults': 'System.Configuration.ConfigurationManager / Registry',
+    'Keychain': 'Windows Credential Manager (CredentialVault)',
+    
+    # Data & Networking
+    'CoreData': 'Entity Framework Core',
+    'SQLite': 'Microsoft.Data.Sqlite',
+    'URLSession': 'System.Net.Http.HttpClient',
+    'CloudKit': 'Azure Mobile Apps / OneDrive SDK',
+    
+    # Hardware & Sensors
+    'CoreLocation': 'Windows.Devices.Geolocation',
+    'CoreBluetooth': 'Windows.Devices.Bluetooth',
+    'AVFoundation': 'Windows.Media.Capture / MediaFoundation',
+    'CoreMotion': 'Windows.Devices.Sensors',
+    
+    # System Integration
+    'UserNotifications': 'Microsoft.Toolkit.Uwp.Notifications',
+    'StoreKit': 'Windows.Services.Store',
+    'WebKit': 'Microsoft.Web.WebView2',
+    'EventKit': 'Windows.ApplicationModel.Appointments',
+    'Contacts': 'Windows.ApplicationModel.Contacts'
+  },
+  'win-to-mac': {
+    # UI Frameworks
+    'System.Windows.Forms': 'AppKit',
+    'WPF': 'AppKit / SwiftUI',
+    'WinUI': 'SwiftUI',
+    'UWP': 'SwiftUI / UIKit (Catalyst)',
+    'MAUI': 'SwiftUI',
+    
+    # Core Systems
+    'System': 'Foundation',
+    'System.IO': 'Foundation (FileManager)',
+    'System.Threading.Tasks': 'Grand Central Dispatch (GCD) / Swift Concurrency',
+    'Registry': 'UserDefaults',
+    'CredentialManager': 'Keychain Services',
+    
+    # Data & Networking
+    'Entity Framework': 'CoreData',
+    'ADO.NET': 'SQLite / CoreData',
+    'HttpClient': 'URLSession',
+    
+    # Hardware & Sensors
+    'Windows.Devices.Geolocation': 'CoreLocation',
+    'Windows.Devices.Bluetooth': 'CoreBluetooth',
+    'Windows.Media': 'AVFoundation',
+    
+    # System Integration
+    'WebView2': 'WKWebView',
+    'ToastNotifications': 'UserNotifications',
+    'MSI/MSIX': 'Pkg / DMG'
+  }
 }
 
 

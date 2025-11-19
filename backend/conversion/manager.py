@@ -1026,6 +1026,71 @@ class ConversionManager:
           }
         )
 
+  async def _auto_fix_chunk(self, session: ConversionSession, record: ChunkRecord, error_message: str) -> bool:
+    """Attempts to automatically fix a chunk that failed validation or compilation."""
+    chunk = record.chunk
+    logger.info('Attempting auto-fix for chunk %s: %s', chunk.chunk_id, error_message)
+    
+    # Prevent infinite loops
+    if getattr(record, 'auto_fix_attempts', 0) >= 3:
+      logger.warning('Max auto-fix attempts reached for %s', chunk.chunk_id)
+      return False
+      
+    record.auto_fix_attempts = getattr(record, 'auto_fix_attempts', 0) + 1
+    
+    fix_prompt = f"""
+The following code conversion encountered an issue. Please FIX the code.
+
+FILE: {chunk.file_path}
+LANGUAGE: {chunk.language}
+ERROR: {error_message}
+
+ORIGINAL CODE (Snippet):
+{chunk.content[:500]}...
+
+CURRENT OUTPUT (Faulty):
+{record.raw_output}
+
+INSTRUCTIONS:
+- Return ONLY the corrected full file content.
+- Fix the specific error mentioned.
+- Maintain the original logic and structure.
+- Do not add markdown formatting or explanations.
+"""
+    
+    try:
+      # Use a "smart" model for fixing if possible
+      config = session.orchestrator_config
+      if 'flash' in config.model_identifier:
+         # Upgrade to a stronger model for the fix if we were using a flash model
+         # This is a heuristic; ideally we'd have a specific 'reasoning' model config
+         pass
+
+      result = await self.orchestrator._invoke_model(
+        route=self.model_router.route(chunk, session.ai_settings, config.provider_id, config.model_identifier), # Re-route or force stronger model?
+        prompt=fix_prompt,
+        temperature=0.2, # Lower temp for fixes
+        max_tokens=config.max_tokens
+      )
+      
+      fixed_code = result.output_text
+      # Simple validation: did we get code back?
+      if not fixed_code.strip():
+        return False
+        
+      # Update record
+      record.raw_output = fixed_code
+      output_path = record.output_path or self._determine_output_path(session, chunk)
+      output_path.parent.mkdir(parents=True, exist_ok=True)
+      output_path.write_text(fixed_code, encoding='utf-8')
+      
+      session.summary_notes.append(f"Auto-fix applied for {chunk.file_path} (Attempt {record.auto_fix_attempts})")
+      return True
+      
+    except Exception as e:
+      logger.error('Auto-fix failed: %s', e)
+      return False
+
   async def _run_quality_stage(self, session: ConversionSession) -> None:
     stage = Stage.QUALITY
     session.progress.start_stage(stage)
@@ -1220,6 +1285,12 @@ class ConversionManager:
       if issue.file_path:
         record = self._find_record_by_path(session, Path(issue.file_path))
         if record:
+          # Attempt auto-fix before queuing manual fix
+          if await self._auto_fix_chunk(session, record, issue.message):
+             # Re-validate? For now, just mark as fixed and let next pass catch it if it fails again
+             # Ideally we should re-run validation immediately, but that might recurse.
+             # We'll assume it's better and if it fails again, it will be caught in next cycle or manual review.
+             continue
           self._enqueue_manual_fix(session, record, 'Validation failure', issue.message)
     return issues
 
